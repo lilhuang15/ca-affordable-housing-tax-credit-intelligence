@@ -35,10 +35,24 @@ XGBoost is the **deployed point model**, not Stacking v2. Although the stack is 
 
 | Method | Coverage | Mean Width |
 |---|---|---|
-| LightGBM quantile p10–p90 | 49.0% | $844K |
-| **Split conformal on XGBoost** *(deployed)* | **84.5%** | $1.90M |
+| LightGBM quantile p10–p90 *(offline benchmark)* | 49.0% | $844K |
+| **Split conformal on XGBoost — log-space** *(deployed)* | **89.3%** | **$2.09M** (multiplicative: pred × [0.57, 1.76], i.e. −43% / +76%) |
 
-The naive LightGBM quantile model under-covers severely on the 2022–2025 holdout — it was trained on 2000–2021 distributions but the test mean is 2.26× larger (real post-COVID construction cost escalation, not a data issue). **Split conformal** wraps XGBoost with a calibration set drawn from the most recent training years (2020–2021) and inherits a finite-sample coverage guarantee under exchangeability, lifting coverage from 49% to 84.5%. The conformal band is what the Streamlit app reports as the user-facing P10/P90.
+The naive LightGBM quantile model under-covers severely on the 2022–2025 holdout — it was trained on 2000–2021 distributions but the test mean is 2.26× larger (real post-COVID construction cost escalation, not a data issue).
+
+**Split conformal on XGBoost — log-space (multiplicative).** Calibration residuals are computed in log space (the model's training space) on the most recent two training years (2020–2021), held out from the conformal model. The deployed interval is therefore a **multiplicative band** on the dollar prediction:
+
+```
+[ pred × exp(−q̂_log),  pred × exp(+q̂_log) ]
+= [ pred × multiplier_low,  pred × multiplier_high ]
+```
+
+The two multipliers are model-level constants (calibrated once, fixed at deploy); the **percentage shift is the same for every project**, but the **dollar width adapts to project size** — a $500K project gets a tighter dollar band than a $5M project. This form has two advantages over an additive dollar-space conformal:
+
+1. The lower bound is always non-negative without ad-hoc clipping at $0.
+2. It implicitly handles heteroscedasticity — large LIHTC awards have larger absolute residuals, and the multiplicative band naturally widens with prediction size.
+
+Coverage retains the finite-sample guarantee under exchangeability. The conformal band is what the Streamlit app reports as the user-facing P5/P95 (dollar amount + constant percentage shift).
 
 ---
 

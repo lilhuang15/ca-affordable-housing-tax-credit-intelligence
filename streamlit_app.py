@@ -313,25 +313,42 @@ def render_credit_estimator(models, lookups, ppi_df, inputs):
     row = build_input_row(inputs, lookups, ppi_df)
     X = models["pipeline"].transform(row)
 
-    # --- XGBoost point estimate + split-conformal interval ---
-    # The interval is symmetric around the XGBoost prediction: ±q_hat in raw $.
-    # q_hat was calibrated on 2020-2021 holdout residuals (Section 8b of NB04).
+    # --- XGBoost point estimate + split-conformal interval (multiplicative) ---
+    # Calibrated on 2020-2021 holdout residuals in log-space (Section 8b of NB04),
+    # applied as a constant multiplicative band on the dollar prediction:
+    #     [pred × multiplier_low,  pred × multiplier_high]
+    # Multipliers are model-level constants; dollar bounds adapt to project size.
     xgb_pred = float(np.expm1(models["xgb"].predict(X)[0]))
-    q_hat = models["conformal"]["q_hat"]
+    mult_low = models["conformal"]["multiplier_low"]
+    mult_high = models["conformal"]["multiplier_high"]
+    pct_low = models["conformal"]["pct_low"]     # e.g. -50.0
+    pct_high = models["conformal"]["pct_high"]   # e.g. +100.0
     coverage_target = int(round((1 - models["conformal"]["alpha"]) * 100))
-    p10 = max(xgb_pred - q_hat, 0.0)
+    p10 = xgb_pred * mult_low
     p50 = xgb_pred
-    p90 = xgb_pred + q_hat
+    p90 = xgb_pred * mult_high
 
-    # --- Key metrics ---
+    # --- Key metrics: dollar amount + percentage ---
     col1, col2, col3 = st.columns(3)
-    col1.metric(f"P{(100 - coverage_target) // 2} (Lower bound)", f"${p10:,.0f}")
+    col1.metric(
+        f"P{(100 - coverage_target) // 2} (Lower)",
+        f"${p10:,.0f}",
+        delta=f"{pct_low:+.0f}%",
+        delta_color="inverse",
+    )
     col2.metric("Point estimate (XGBoost)", f"${p50:,.0f}")
-    col3.metric(f"P{100 - (100 - coverage_target) // 2} (Upper bound)", f"${p90:,.0f}")
+    col3.metric(
+        f"P{100 - (100 - coverage_target) // 2} (Upper)",
+        f"${p90:,.0f}",
+        delta=f"{pct_high:+.0f}%",
+        delta_color="normal",
+    )
     st.caption(
-        f"Interval bounds come from split-conformal calibration on XGBoost "
-        f"({coverage_target}% target coverage; {models['conformal']['coverage_test']:.1f}% achieved on the 2022–2025 test set). "
-        f"q̂ = ${q_hat:,.0f}."
+        f"Split conformal on XGBoost in **log space** — multiplicative band "
+        f"`pred × [{mult_low:.2f}, {mult_high:.2f}]` (constant {pct_low:+.0f}% / {pct_high:+.0f}% per project, "
+        f"dollar width adapts to prediction size). "
+        f"{coverage_target}% target coverage; "
+        f"{models['conformal']['coverage_test']:.1f}% achieved on the 2022–2025 test set."
     )
 
     # --- Confidence range bar chart ---
@@ -731,7 +748,7 @@ def render_model_card(models, model_comparison):
 
 **Deployed point estimator:** XGBoost — R² = {xgb_row['R2']:.2f}, MAPE = {xgb_row['MAPE (%)']:.1f}%, within 10% of actual on {xgb_row['Within 10%']:.1f}% of test rows.
 
-**Deployed prediction interval:** Split conformal on XGBoost — {coverage_target}% target coverage, {conf['coverage_test']:.1f}% achieved on the 2022–2025 test set; mean width ${conf['mean_width']:,.0f}; calibrated on the 2020–2021 holdout (n_cal = {conf['n_cal']}). Stacking v2 and the LightGBM quantile model are reported as offline benchmarks but not loaded by the app.
+**Deployed prediction interval:** Split conformal on XGBoost (log-space) — multiplicative band `pred × [{conf['multiplier_low']:.2f}, {conf['multiplier_high']:.2f}]` ({conf['pct_low']:+.0f}% / {conf['pct_high']:+.0f}%), {coverage_target}% target coverage, {conf['coverage_test']:.1f}% achieved on the 2022–2025 test set; mean width ${conf['mean_width']:,.0f}; calibrated on the 2020–2021 holdout (n_cal = {conf['n_cal']}). Stacking v2 and the LightGBM quantile model are reported as offline benchmarks but not loaded by the app.
 
 **Data Sources:**
 - CTCAC Project Database (primary — 6,103 projects, 1989–2025)

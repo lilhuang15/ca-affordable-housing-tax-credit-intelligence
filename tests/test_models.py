@@ -96,7 +96,7 @@ def test_data():
 # ---------------------------------------------------------------------------
 MODEL_FILES = [
     'xgb_model.pkl',                # XGBoost — deployed point estimator
-    'conformal_calibration.pkl',    # Split-conformal q_hat — deployed interval
+    'conformal_calibration.pkl',    # Split-conformal multipliers (log-space) — deployed interval
     'rf_model.pkl',                 # Random Forest
     'ridge_model.pkl',              # Ridge baseline
     'credit_quantile.pkl',          # LightGBM p10/p50/p90 dict (offline benchmark)
@@ -218,13 +218,24 @@ def test_kmeans_cluster_count():
 # Test 9: Split-conformal calibration artifact is well-formed
 # ---------------------------------------------------------------------------
 def test_conformal_calibration_loads():
-    """The deployed prediction interval relies on this small calibration dict."""
+    """The deployed prediction interval relies on this small calibration dict
+    (log-space, multiplicative form)."""
     conf = joblib.load(os.path.join(MODEL_DIR, 'conformal_calibration.pkl'))
 
-    for key in ('q_hat', 'alpha', 'n_cal', 'coverage_test', 'mean_width'):
+    required = ('q_hat_log', 'multiplier_low', 'multiplier_high',
+                'pct_low', 'pct_high', 'space',
+                'alpha', 'n_cal', 'coverage_test', 'mean_width')
+    for key in required:
         assert key in conf, f'Missing key in conformal_calibration.pkl: {key}'
 
-    assert conf['q_hat'] > 0, 'q_hat must be positive'
+    assert conf['space'] == 'log', "expected log-space conformal calibration"
+    assert conf['q_hat_log'] > 0, 'q_hat_log must be positive'
+    assert 0 < conf['multiplier_low'] < 1 < conf['multiplier_high'], (
+        'multipliers must satisfy 0 < low < 1 < high'
+    )
+    assert conf['pct_low'] < 0 < conf['pct_high'], (
+        'pct bounds must straddle zero (lower negative, upper positive)'
+    )
     assert 0 < conf['alpha'] < 1, 'alpha must be in (0, 1)'
     assert conf['n_cal'] > 0, 'calibration set must be non-empty'
 
