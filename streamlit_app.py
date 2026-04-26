@@ -3,8 +3,8 @@ CA Affordable Housing Tax Credit Intelligence Platform
 ======================================================
 Streamlit app — Phase 1 (3 tabs).
 
-Tab 1: Credit Estimator     — predict p10/p50/p90 annual federal credit
-Tab 2: Market Comparables   — KNN top-10 + KMeans archetype + map
+Tab 1: Credit Estimator      — XGBoost point estimate + split-conformal interval + SHAP
+Tab 2: Market Comparables    — KNN top-10 + KMeans archetype + map
 Tab 3: Credit Trend Analysis — statewide/county/housing-type trends
 
 Run:  streamlit run streamlit_app.py
@@ -42,13 +42,19 @@ def load_models():
     """Load all .pkl model files into memory once."""
     models = {}
     models["xgb"] = joblib.load(os.path.join(MODEL_DIR, "xgb_model.pkl"))
-    models["quantile"] = joblib.load(os.path.join(MODEL_DIR, "credit_quantile.pkl"))
+    models["conformal"] = joblib.load(os.path.join(MODEL_DIR, "conformal_calibration.pkl"))
     models["knn"] = joblib.load(os.path.join(MODEL_DIR, "knn_model.pkl"))
     models["kmeans"] = joblib.load(os.path.join(MODEL_DIR, "kmeans_model.pkl"))
     models["pipeline"] = joblib.load(os.path.join(MODEL_DIR, "feature_pipeline.pkl"))
     models["config"] = joblib.load(os.path.join(MODEL_DIR, "feature_config.pkl"))
     models["shap"] = joblib.load(os.path.join(MODEL_DIR, "shap_explainer.pkl"))
     return models
+
+
+@st.cache_data
+def load_model_comparison():
+    """Load test-set metrics table written by NB04."""
+    return pd.read_csv(os.path.join(MODEL_DIR, "model_comparison.csv"))
 
 
 @st.cache_data
@@ -167,6 +173,7 @@ def build_input_row(inputs, lookups, ppi_df):
         "two_br_pct": inputs["two_br_pct"],
         "three_plus_br_pct": inputs["three_plus_br_pct"],
         "deep_ami_pct": inputs["deep_ami_pct"],
+        "low_ami_pct": inputs["low_ami_pct"],
         "mid_ami_pct": inputs["mid_ami_pct"],
         "pis_year": inputs["pis_year"],
         "ppi_at_allocation": ppi_val,
@@ -255,8 +262,9 @@ def render_sidebar(lookups):
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("AMI Targeting (%)")
-    st.sidebar.caption("Deep = ≤30% AMI, Mid = 50-60% AMI. Must sum to ≤100%")
+    st.sidebar.caption("Deep = ≤30% AMI, Low = 30-50% AMI, Mid = 50-60% AMI. Must sum to ≤100%")
     deep_ami = st.sidebar.slider("Deep (≤30% AMI) %", 0, 100, 10, 5)
+    low_ami = st.sidebar.slider("Low (30-50% AMI) %", 0, 100, 30, 5)
     mid_ami = st.sidebar.slider("Mid (50-60% AMI) %", 0, 100, 60, 5)
 
     st.sidebar.markdown("---")
@@ -280,6 +288,7 @@ def render_sidebar(lookups):
         "two_br_pct": two_br_pct / 100.0,
         "three_plus_br_pct": three_br_pct / 100.0,
         "deep_ami_pct": deep_ami / 100.0,
+        "low_ami_pct": low_ami / 100.0,
         "mid_ami_pct": mid_ami / 100.0,
         "li_units_pct": li_units_pct,
         "pis_year": pis_year,
@@ -304,33 +313,34 @@ def render_credit_estimator(models, lookups, ppi_df, inputs):
     row = build_input_row(inputs, lookups, ppi_df)
     X = models["pipeline"].transform(row)
 
-    # --- Quantile predictions (p10 / p50 / p90) ---
-    q = models["quantile"]
-    p10_log = q["p10"].predict(X)[0]
-    p50_log = q["p50"].predict(X)[0]
-    p90_log = q["p90"].predict(X)[0]
-
-    # Enforce ordering
-    ordered = np.sort([p10_log, p50_log, p90_log])
-    p10 = np.expm1(ordered[0])
-    p50 = np.expm1(ordered[1])
-    p90 = np.expm1(ordered[2])
-
-    # XGBoost point estimate
-    xgb_pred = np.expm1(models["xgb"].predict(X)[0])
+    # --- XGBoost point estimate + split-conformal interval ---
+    # The interval is symmetric around the XGBoost prediction: ±q_hat in raw $.
+    # q_hat was calibrated on 2020-2021 holdout residuals (Section 8b of NB04).
+    xgb_pred = float(np.expm1(models["xgb"].predict(X)[0]))
+    q_hat = models["conformal"]["q_hat"]
+    coverage_target = int(round((1 - models["conformal"]["alpha"]) * 100))
+    p10 = max(xgb_pred - q_hat, 0.0)
+    p50 = xgb_pred
+    p90 = xgb_pred + q_hat
 
     # --- Key metrics ---
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("P10 (Conservative)", f"${p10:,.0f}")
-    col2.metric("P50 (Median)", f"${p50:,.0f}")
-    col3.metric("P90 (Optimistic)", f"${p90:,.0f}")
-    col4.metric("XGBoost Estimate", f"${xgb_pred:,.0f}")
+    col1, col2, col3 = st.columns(3)
+    col1.metric(f"P{(100 - coverage_target) // 2} (Lower bound)", f"${p10:,.0f}")
+    col2.metric("Point estimate (XGBoost)", f"${p50:,.0f}")
+    col3.metric(f"P{100 - (100 - coverage_target) // 2} (Upper bound)", f"${p90:,.0f}")
+    st.caption(
+        f"Interval bounds come from split-conformal calibration on XGBoost "
+        f"({coverage_target}% target coverage; {models['conformal']['coverage_test']:.1f}% achieved on the 2022–2025 test set). "
+        f"q̂ = ${q_hat:,.0f}."
+    )
 
     # --- Confidence range bar chart ---
-    st.subheader("Annual Federal Credit — Confidence Range")
+    st.subheader("Annual Federal Credit — Conformal Interval")
+    lo_label = f"P{(100 - coverage_target) // 2}"
+    hi_label = f"P{100 - (100 - coverage_target) // 2}"
     fig_bar = go.Figure()
     fig_bar.add_trace(go.Bar(
-        x=["P10\n(Conservative)", "P50\n(Median)", "P90\n(Optimistic)"],
+        x=[f"{lo_label}\n(Lower)", "Point\n(XGBoost)", f"{hi_label}\n(Upper)"],
         y=[p10, p50, p90],
         marker_color=["#5499c7", "#2ecc71", "#e67e22"],
         text=[f"${p10:,.0f}", f"${p50:,.0f}", f"${p90:,.0f}"],
@@ -342,7 +352,7 @@ def render_credit_estimator(models, lookups, ppi_df, inputs):
         height=400,
         showlegend=False,
     )
-    st.plotly_chart(fig_bar, use_container_width=True)
+    st.plotly_chart(fig_bar, width="stretch")
 
     # --- 10-year credit stream & equity ---
     st.subheader("10-Year Credit Stream & Equity Estimate")
@@ -353,9 +363,9 @@ def render_credit_estimator(models, lookups, ppi_df, inputs):
 
     stream_col1, stream_col2, stream_col3 = st.columns(3)
     for col, label, annual in [
-        (stream_col1, "Conservative (P10)", p10),
-        (stream_col2, "Median (P50)", p50),
-        (stream_col3, "Optimistic (P90)", p90),
+        (stream_col1, f"Lower bound ({lo_label})", p10),
+        (stream_col2, "Point estimate", p50),
+        (stream_col3, f"Upper bound ({hi_label})", p90),
     ]:
         ten_yr = annual * 10
         equity = ten_yr * credit_price
@@ -375,7 +385,7 @@ def render_credit_estimator(models, lookups, ppi_df, inputs):
     basis_per_unit = basis_p50 / inputs["total_units"]
 
     basis_col1, basis_col2, basis_col3 = st.columns(3)
-    basis_col1.metric("Implied Eligible Basis (P50)", f"${basis_p50:,.0f}")
+    basis_col1.metric("Implied Eligible Basis (point)", f"${basis_p50:,.0f}")
     basis_col2.metric("Implied Basis per Unit", f"${basis_per_unit:,.0f}")
     basis_col3.metric("Credit Rate Used", f"{credit_rate:.0%}")
 
@@ -404,7 +414,7 @@ def render_credit_estimator(models, lookups, ppi_df, inputs):
         yaxis=dict(autorange="reversed"),
         margin=dict(l=10, r=10),
     )
-    st.plotly_chart(fig_shap, use_container_width=True)
+    st.plotly_chart(fig_shap, width="stretch")
 
     # --- Plain-English summary ---
     top_pos = [(n, v) for n, v in shap_top if v > 0]
@@ -428,12 +438,12 @@ def render_credit_estimator(models, lookups, ppi_df, inputs):
         "Credit Type": inputs["credit_type"],
         "Total Units": int(inputs["total_units"]),
         "PIS Year": inputs["pis_year"],
-        "P10 Annual Credit": round(p10),
-        "P50 Annual Credit": round(p50),
-        "P90 Annual Credit": round(p90),
-        "XGBoost Estimate": round(xgb_pred),
-        "10yr P50 Stream": round(p50 * 10),
-        "Implied Eligible Basis (P50)": round(basis_p50),
+        "Point Estimate (XGBoost)": round(p50),
+        f"Conformal Lower (P{(100 - coverage_target) // 2})": round(p10),
+        f"Conformal Upper (P{100 - (100 - coverage_target) // 2})": round(p90),
+        f"Conformal Coverage Target": f"{coverage_target}%",
+        "10yr Point Stream": round(p50 * 10),
+        "Implied Eligible Basis (Point)": round(basis_p50),
         "Implied Basis per Unit": round(basis_per_unit),
     }])
     st.download_button(
@@ -462,13 +472,12 @@ def render_comparables(models, df, lookups, ppi_df, inputs):
     X = models["pipeline"].transform(row)
 
     # --- KNN: find 10 nearest neighbors ---
-    # KNN was trained on the full training set transformed features
-    X_train = np.load(os.path.join(MODEL_DIR, "X_train.npy"))
+    # KNN was trained on the full scoped dataset (train + test, 4,387 rows)
     distances, indices = models["knn"].kneighbors(X)
     neighbor_indices = indices[0]
 
-    # Map back to training data rows
-    df_train = pd.read_parquet(os.path.join(MODEL_DIR, "train_data.parquet"))
+    # Map back to full scoped data (must match what KNN was fitted on)
+    df_train = pd.read_parquet(os.path.join(MODEL_DIR, "df_all_scoped.parquet"))
     df_train["county"] = df_train["county"].str.strip().str.title()
     comps = df_train.iloc[neighbor_indices].copy()
     comps["distance"] = distances[0]
@@ -500,16 +509,18 @@ def render_comparables(models, df, lookups, ppi_df, inputs):
     )
     display_df["Similarity"] = display_df["Similarity"].apply(lambda x: f"{x:.2%}")
 
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    st.dataframe(display_df, width="stretch", hide_index=True)
 
     # --- KMeans archetype ---
     st.subheader("Project Archetype")
     cluster_id = models["kmeans"].predict(X)[0]
 
-    # Get archetype stats from training data
-    X_train_all = np.load(os.path.join(MODEL_DIR, "X_train.npy"))
-    train_clusters = models["kmeans"].predict(X_train_all)
-    cluster_mask = train_clusters == cluster_id
+    # Get archetype stats from the full scoped dataset (matches df_train above)
+    X_train_arr = np.load(os.path.join(MODEL_DIR, "X_train.npy"))
+    X_test_arr = np.load(os.path.join(MODEL_DIR, "X_test.npy"))
+    X_all = np.vstack([X_train_arr, X_test_arr])
+    all_clusters = models["kmeans"].predict(X_all)
+    cluster_mask = all_clusters == cluster_id
     cluster_projects = df_train[cluster_mask]
 
     if len(cluster_projects) > 0:
@@ -548,7 +559,7 @@ def render_comparables(models, df, lookups, ppi_df, inputs):
             title=f"{inputs['housing_type']} in {inputs['county']} — Median Annual Credit Over Time",
         )
         fig_trend.update_layout(yaxis_tickformat="$,.0f")
-        st.plotly_chart(fig_trend, use_container_width=True)
+        st.plotly_chart(fig_trend, width="stretch")
     else:
         st.warning(
             f"Not enough historical data for {inputs['housing_type']} "
@@ -574,7 +585,7 @@ def render_comparables(models, df, lookups, ppi_df, inputs):
     map_data = pd.concat([map_data, user_row], ignore_index=True)
     map_data["type"] = ["Comparable"] * (len(map_data) - 1) + ["Your Project"]
 
-    fig_map = px.scatter_mapbox(
+    fig_map = px.scatter_map(
         map_data,
         lat="lat", lon="lon",
         color="type",
@@ -584,11 +595,11 @@ def render_comparables(models, df, lookups, ppi_df, inputs):
         size_max=15,
         zoom=5,
         center={"lat": 36.7, "lon": -119.8},
-        mapbox_style="carto-positron",
+        map_style="carto-positron",
         title="Comparable Projects Map",
     )
     fig_map.update_traces(marker=dict(size=12))
-    st.plotly_chart(fig_map, use_container_width=True)
+    st.plotly_chart(fig_map, width="stretch")
 
     # --- Download comparables ---
     st.download_button(
@@ -626,7 +637,7 @@ def render_trends(df):
         color_discrete_map={"9%": "#2ecc71", "4%": "#5499c7"},
     )
     fig_state.update_layout(yaxis_tickformat="$,.0f")
-    st.plotly_chart(fig_state, use_container_width=True)
+    st.plotly_chart(fig_state, width="stretch")
 
     # --- County comparison ---
     st.subheader("County Comparison")
@@ -657,7 +668,7 @@ def render_trends(df):
             },
         )
         fig_county.update_layout(yaxis_tickformat="$,.0f")
-        st.plotly_chart(fig_county, use_container_width=True)
+        st.plotly_chart(fig_county, width="stretch")
 
     # --- Housing type breakdown ---
     st.subheader("Credit per Unit by Housing Type")
@@ -675,7 +686,7 @@ def render_trends(df):
         },
     )
     fig_ht.update_layout(yaxis_tickformat="$,.0f")
-    st.plotly_chart(fig_ht, use_container_width=True)
+    st.plotly_chart(fig_ht, width="stretch")
 
     # --- AMI depth trend ---
     st.subheader("Deep Affordability Targeting Over Time")
@@ -690,7 +701,7 @@ def render_trends(df):
         color_discrete_sequence=["#8e44ad"],
     )
     fig_ami.update_layout(yaxis_tickformat=".1f")
-    st.plotly_chart(fig_ami, use_container_width=True)
+    st.plotly_chart(fig_ami, width="stretch")
 
     # --- Volume over time ---
     st.subheader("Project Volume by Year")
@@ -700,21 +711,27 @@ def render_trends(df):
         labels={"pis_year": "Year", "Projects": "Number of Projects"},
         color_discrete_sequence=["#1abc9c"],
     )
-    st.plotly_chart(fig_vol, use_container_width=True)
+    st.plotly_chart(fig_vol, width="stretch")
 
 
 # ---------------------------------------------------------------------------
 # Model Card
 # ---------------------------------------------------------------------------
-def render_model_card():
+def render_model_card(models, model_comparison):
     st.markdown("---")
     with st.expander("Model Card — Data & Methodology"):
-        st.markdown("""
+        xgb_row = model_comparison[model_comparison["Model"] == "XGBoost"].iloc[0]
+        conf = models["conformal"]
+        coverage_target = int(round((1 - conf["alpha"]) * 100))
+
+        st.markdown(f"""
 **Training Data:** 3,536 CA LIHTC projects, placed in service 2000–2021
 **Test Data:** 851 projects, placed in service 2022–2025
 **Target Variable:** Annual Federal Tax Credit Award (log-transformed for training)
-**Best Model:** XGBoost (R² = 0.63, MAPE = 26.0% on test set)
-**Quantile Model:** LightGBM (p10/p50/p90 confidence range)
+
+**Deployed point estimator:** XGBoost — R² = {xgb_row['R2']:.2f}, MAPE = {xgb_row['MAPE (%)']:.1f}%, within 10% of actual on {xgb_row['Within 10%']:.1f}% of test rows.
+
+**Deployed prediction interval:** Split conformal on XGBoost — {coverage_target}% target coverage, {conf['coverage_test']:.1f}% achieved on the 2022–2025 test set; mean width ${conf['mean_width']:,.0f}; calibrated on the 2020–2021 holdout (n_cal = {conf['n_cal']}). Stacking v2 and the LightGBM quantile model are reported as offline benchmarks but not loaded by the app.
 
 **Data Sources:**
 - CTCAC Project Database (primary — 6,103 projects, 1989–2025)
@@ -724,10 +741,9 @@ def render_model_card():
 
 **Known Limitations:**
 - The 2022–2025 test period saw a **2.26× distribution shift** in credit amounts vs training (post-COVID construction cost escalation). Model accuracy may vary for projects unlike the training distribution.
+- The conformal interval is *marginally* calibrated across the whole test set — coverage on individual subgroups (county, region, credit type) may differ. A Mondrian (group-conditional) variant is on the roadmap.
 - County-level features use historical medians as proxies for future values.
 - Implied Eligible Basis is a derived proxy, not a direct cost figure.
-
-**Last Trained:** April 2026 | **Pipeline Version:** v1.0
         """)
 
 
@@ -746,6 +762,7 @@ def main():
     df = load_project_data()
     ppi_df = load_ppi()
     lookups = build_lookups(df)
+    model_comparison = load_model_comparison()
 
     # Sidebar inputs (shared across tabs)
     inputs = render_sidebar(lookups)
@@ -767,7 +784,7 @@ def main():
         render_trends(df)
 
     # Model card at the bottom
-    render_model_card()
+    render_model_card(models, model_comparison)
 
 
 if __name__ == "__main__":

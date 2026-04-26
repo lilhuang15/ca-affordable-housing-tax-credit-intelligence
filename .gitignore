@@ -45,3 +45,27 @@ __pycache__/
 # --- Word / Office lock files ---
 ~$*.docx
 ~$*.xlsx
+
+# --- Phase 2 (LLM agent + RAG) — local development only, do not publish ---
+agent.py
+streamlit_app_phase2.py
+data/05_rag_ingest.ipynb
+data/06_eval_harness.ipynb
+tests/test_agent.py
+eval/
+rag_db/
+rag document library/
+
+# --- Internal / planning docs — not for public ---
+Blueprint_v3.md
+Blueprint_v3.docx
+docs/
+CLAUDE.md
+
+# --- Scratchpad / WIP notebooks ---
+data/03_feature.ipynb
+data/03_feature_engineering_v2.ipynb
+data/04_Notes_modeling.ipynb
+
+# --- Archived prior versions ---
+archive/

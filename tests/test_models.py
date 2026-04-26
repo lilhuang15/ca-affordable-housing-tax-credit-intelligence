@@ -95,15 +95,15 @@ def test_data():
 # Test 1: All model files exist
 # ---------------------------------------------------------------------------
 MODEL_FILES = [
-    'credit_model.pkl',       # Stacking ensemble
-    'xgb_model.pkl',          # XGBoost (best single model)
-    'rf_model.pkl',           # Random Forest
-    'ridge_model.pkl',        # Ridge baseline
-    'credit_quantile.pkl',    # LightGBM p10/p50/p90 dict
-    'knn_model.pkl',          # KNN for comparables
-    'kmeans_model.pkl',       # KMeans for archetypes
-    'shap_explainer.pkl',     # SHAP TreeExplainer
-    'feature_pipeline.pkl',   # ColumnTransformer
+    'xgb_model.pkl',                # XGBoost — deployed point estimator
+    'conformal_calibration.pkl',    # Split-conformal q_hat — deployed interval
+    'rf_model.pkl',                 # Random Forest
+    'ridge_model.pkl',              # Ridge baseline
+    'credit_quantile.pkl',          # LightGBM p10/p50/p90 dict (offline benchmark)
+    'knn_model.pkl',                # KNN for comparables
+    'kmeans_model.pkl',             # KMeans for archetypes
+    'shap_explainer.pkl',           # SHAP TreeExplainer
+    'feature_pipeline.pkl',         # ColumnTransformer
 ]
 
 @pytest.mark.parametrize('filename', MODEL_FILES)
@@ -215,20 +215,18 @@ def test_kmeans_cluster_count():
 
 
 # ---------------------------------------------------------------------------
-# Test 9: Stacking ensemble loads and predicts
+# Test 9: Split-conformal calibration artifact is well-formed
 # ---------------------------------------------------------------------------
-def test_stacking_loads_and_predicts(test_data):
-    """The 150MB Stacking model must load and produce valid predictions."""
-    X_test, _ = test_data
-    stacking = joblib.load(os.path.join(MODEL_DIR, 'credit_model.pkl'))
+def test_conformal_calibration_loads():
+    """The deployed prediction interval relies on this small calibration dict."""
+    conf = joblib.load(os.path.join(MODEL_DIR, 'conformal_calibration.pkl'))
 
-    preds = stacking.predict(X_test)
-    assert preds.shape == (X_test.shape[0],)
-    assert not np.isnan(preds).any(), 'Stacking produced NaN predictions'
+    for key in ('q_hat', 'alpha', 'n_cal', 'coverage_test', 'mean_width'):
+        assert key in conf, f'Missing key in conformal_calibration.pkl: {key}'
 
-    # Back-transform and check range
-    preds_dollars = np.expm1(preds)
-    assert preds_dollars.min() > 0, 'Stacking predicted negative credits'
+    assert conf['q_hat'] > 0, 'q_hat must be positive'
+    assert 0 < conf['alpha'] < 1, 'alpha must be in (0, 1)'
+    assert conf['n_cal'] > 0, 'calibration set must be non-empty'
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +277,7 @@ def test_feature_pipeline_transforms_new_input():
         'two_br_pct': 0.35,
         'three_plus_br_pct': 0.25,
         'deep_ami_pct': 0.10,
+        'low_ami_pct': 0.30,
         'mid_ami_pct': 0.60,
         'pis_year': 2026,
         'ppi_at_allocation': 350.0,

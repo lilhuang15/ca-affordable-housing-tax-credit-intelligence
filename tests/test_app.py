@@ -136,6 +136,7 @@ def sample_inputs():
         "two_br_pct": 0.35,
         "three_plus_br_pct": 0.25,
         "deep_ami_pct": 0.10,
+        "low_ami_pct": 0.30,
         "mid_ami_pct": 0.60,
         "li_units_pct": 0.95,
         "pis_year": 2026,
@@ -193,7 +194,7 @@ def test_build_input_row(sample_inputs, lookups, ppi_df):
 
     expected_cols = [
         "total_units", "li_units_pct", "studio_pct", "one_br_pct",
-        "two_br_pct", "three_plus_br_pct", "deep_ami_pct", "mid_ami_pct",
+        "two_br_pct", "three_plus_br_pct", "deep_ami_pct", "low_ami_pct", "mid_ami_pct",
         "pis_year", "ppi_at_allocation", "ppi_yoy_change", "ppi_2yr_trend",
         "fmr_2br", "county_median_income", "county_median_rent",
         "county", "region", "credit_type", "construction_type", "housing_type",

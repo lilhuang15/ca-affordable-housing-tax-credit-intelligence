@@ -19,15 +19,26 @@ Given a project's characteristics (county, size, unit mix, credit type, housing 
 
 ## Results (Test Set: 2022–2025)
 
+### Point Estimate Accuracy
+
 | Model | R² | MAPE | Within 10% |
 |---|---|---|---|
-| Ridge (baseline) | -0.06 | 43.8% | 19.3% |
-| Random Forest | 0.39 | 29.6% | 14.9% |
-| **XGBoost** | **0.63** | **26.0%** | **22.6%** |
-| Stacking Ensemble | 0.59 | 29.0% | 26.3% |
-| LightGBM p50 | 0.54 | 26.8% | 21.6% |
+| Ridge (baseline) | -0.29 | 43.2% | 18.2% |
+| Random Forest | 0.39 | 29.5% | 14.8% |
+| **XGBoost** *(deployed)* | **0.62** | **25.9%** | **22.8%** |
+| LightGBM p50 (tuned) | 0.53 | 26.7% | 20.8% |
+| Stacking v2 (RF + XGB + LGBM-p50 → Ridge meta) | 0.68 | 25.4% | 26.8% |
 
-Test set (2022–2025) has a **2.26× distribution shift** vs training (2000–2021) — real post-COVID construction cost escalation, not a data issue.
+XGBoost is the **deployed point model**, not Stacking v2. Although the stack is ~1pp better on MAPE, the deployment trade-off favors XGBoost: SHAP `TreeExplainer` works natively (precise + millisecond), the artifact is 236 KB vs Stacking's ~80 MB, inference latency is ~3× lower, and bootstrap 95% CIs for MAPE overlap. Stacking v2 is reported as an offline benchmark.
+
+### Prediction Interval Coverage (target: 90%)
+
+| Method | Coverage | Mean Width |
+|---|---|---|
+| LightGBM quantile p10–p90 | 49.0% | $844K |
+| **Split conformal on XGBoost** *(deployed)* | **84.5%** | $1.90M |
+
+The naive LightGBM quantile model under-covers severely on the 2022–2025 holdout — it was trained on 2000–2021 distributions but the test mean is 2.26× larger (real post-COVID construction cost escalation, not a data issue). **Split conformal** wraps XGBoost with a calibration set drawn from the most recent training years (2020–2021) and inherits a finite-sample coverage guarantee under exchangeability, lifting coverage from 49% to 84.5%. The conformal band is what the Streamlit app reports as the user-facing P10/P90.
 
 ---
 
@@ -62,9 +73,10 @@ streamlit_app.py         →  interactive demo
 |---|---|
 | Ridge | Interpretable baseline |
 | Random Forest | Non-linear baseline |
-| XGBoost | Best single predictor (gradient boosting) |
-| Stacking (Ridge + RF + XGBoost → Ridge meta) | Ensemble |
-| LightGBM Quantile (p10/p50/p90) | Confidence range output |
+| **XGBoost** | **Deployed point estimator** (gradient boosting) |
+| Stacking v2 (RF + XGB + LightGBM-p50 → Ridge meta) | Offline benchmark — best raw accuracy |
+| LightGBM Quantile (p10/p50/p90, tuned per-quantile, pinball-loss CV) | Offline benchmark — under-covers on shifted test set |
+| **Split Conformal on XGBoost** | **Deployed prediction interval** (90% target) |
 | KNN (cosine, k=10) | Market comparables retrieval |
 | KMeans (k=6) | Project archetype clustering |
 
@@ -72,12 +84,12 @@ streamlit_app.py         →  interactive demo
 
 ## Feature Engineering Highlights
 
-- **TargetEncoder** for `county` and `region` — avoids 50+ sparse one-hot columns
-- **StandardScaler + median imputation** for 15 numeric features
-- **OneHotEncoder** for `credit_type`, `construction_type`, `housing_type`
+- **TargetEncoder** for `county` only (50+ unique values) — 5-fold cross-fitting, empirical Bayes smoothing, fit on training split only
+- **OneHotEncoder** for `credit_type`, `construction_type`, `housing_type`, and `region` — region was moved here from TargetEncoder because its 5 categories produced a scalar 71% correlated with county TE (redundant for trees, harmful for Ridge)
+- **StandardScaler + median imputation** for 16 numeric features
 - **ColumnTransformer fit on training split only** — strict leakage prevention
-- **Log-transform target** `log1p(annual_federal_award)` — reduces skew from 4.31 → -0.28
-- **Walk-forward TimeSeriesSplit(n_splits=4)** for hyperparameter tuning
+- **Log-transform target** `log1p(annual_federal_award)` — reduces train skew from 4.31 → -0.28
+- **Walk-forward TimeSeriesSplit(n_splits=4)** for hyperparameter tuning, on a `pis_year`-sorted training frame so folds are genuine walk-forward windows
 
 ---
 
@@ -119,23 +131,25 @@ data/
 models/
 ├── feature_pipeline.pkl           # Fitted ColumnTransformer
 ├── feature_config.pkl             # Feature names and split parameters
-├── xgb_model.pkl                  # XGBoost (best single model)
-├── credit_quantile.pkl            # LightGBM p10/p50/p90
+├── xgb_model.pkl                  # XGBoost — deployed point estimator
+├── conformal_calibration.pkl      # Split-conformal q_hat — deployed interval
+├── credit_quantile.pkl            # LightGBM p10/p50/p90 (offline benchmark)
 ├── knn_model.pkl                  # KNN for comparables
 ├── kmeans_model.pkl               # KMeans for archetypes
 ├── ridge_model.pkl                # Ridge baseline
-└── shap_explainer.pkl             # SHAP TreeExplainer for XGBoost
-
-docs/
-├── Pipeline_Technical_Guide.md    # Full technical explanation of every pipeline decision
-└── Pipeline_Technical_Guide.docx
+├── shap_explainer.pkl             # SHAP TreeExplainer for XGBoost
+├── train_data.parquet             # Pre-transform train frame (used by app)
+├── test_data.parquet              # Pre-transform test frame
+├── df_all_scoped.parquet          # Train + test combined (KNN/KMeans index)
+├── X_train.npy / X_test.npy       # Transformed feature arrays
+├── y_train.npy / y_test.npy       # Target arrays
+└── model_comparison.csv           # Test-set metrics across all models
 
 streamlit_app.py                   # Streamlit demo (Phase 1)
 requirements.txt
-Blueprint_v3.md                    # Full project specification
 ```
 
-> Large files excluded from git: `data/ctcac_projects.xlsx`, `data/FMR_All_1983_2026.csv`, `models/credit_model.pkl` (150MB Stacking ensemble), `models/rf_model.pkl` (75MB). Re-generate by running the notebooks.
+> Large files excluded from git: `data/ctcac_projects.xlsx`, `data/FMR_All_1983_2026.csv`, `models/rf_model.pkl` (~78 MB Random Forest, kept for reproducibility but not loaded by the app). Re-generate by running the notebooks.
 
 ---
 
@@ -145,6 +159,14 @@ An AI Credit Advisor tab using Anthropic tool-calling (`claude-haiku-4-5`) with:
 - 4 tools: `predict_credit_amount`, `get_comparables`, `get_construction_index`, `compliance_qa`
 - ChromaDB + BM25 hybrid RAG over CTCAC/IRS compliance documents
 - Conversation memory and structured citations
+
+---
+
+## Future Work
+
+- **Mondrian (group-conditional) conformal prediction.** The current split-conformal interval is *marginally* calibrated to ~85% across the whole test set, but coverage may vary by subgroup (e.g. 90% in LA County, 70% in rural counties). A Mondrian variant — bucketing by `county`, `region`, or `credit_type` and computing a separate `q_hat` per bucket — would target conditional coverage and is the standard fairness-aware extension. ~20 lines on top of the existing pipeline.
+- **Conformalize Stacking v2.** Wrap the Stacking ensemble in the same split-conformal procedure and compare coverage / interval width vs the XGBoost-based version. If the two are close, this is additional evidence that XGBoost is the right deployment choice; if Stacking gives meaningfully tighter intervals at equal coverage, the deployment trade-off (artifact size, latency, SHAP) becomes a sharper conversation.
+- **Single distributional model.** Replace the (XGBoost + conformal) + (LightGBM quantile) two-track setup with a single distributional estimator such as CatBoost `MultiQuantile` or NGBoost, which produces coherent multi-quantile output from one model.
 
 ---
 
