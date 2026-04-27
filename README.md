@@ -23,20 +23,22 @@ Given a project's characteristics (county, size, unit mix, credit type, housing 
 
 | Model | R² | MAPE | Within 10% |
 |---|---|---|---|
-| Ridge (baseline) | -0.29 | 43.2% | 18.2% |
-| Random Forest | 0.39 | 29.5% | 14.8% |
-| **XGBoost** *(deployed)* | **0.62** | **25.9%** | **22.8%** |
-| LightGBM p50 (tuned) | 0.53 | 26.7% | 20.8% |
-| Stacking v2 (RF + XGB + LGBM-p50 → Ridge meta) | 0.68 | 25.4% | 26.8% |
+| Ridge (baseline) | -0.35 | 44.2% | 18.4% |
+| Random Forest | 0.40 | 29.4% | 15.2% |
+| **XGBoost** *(deployed)* | **0.61** | **26.3%** | **23.6%** |
+| LightGBM p50 (tuned) | 0.54 | 26.4% | 20.4% |
+| Stacking v2 (RF + XGB + LGBM-p50 → Ridge meta) | 0.65 | 25.7% | 26.3% |
 
-XGBoost is the **deployed point model**, not Stacking v2. Although the stack is ~1pp better on MAPE, the deployment trade-off favors XGBoost: SHAP `TreeExplainer` works natively (precise + millisecond), the artifact is 236 KB vs Stacking's ~80 MB, inference latency is ~3× lower, and bootstrap 95% CIs for MAPE overlap. Stacking v2 is reported as an offline benchmark.
+XGBoost is the **deployed point model**, not Stacking v2. Although the stack is ~0.6pp better on MAPE, the deployment trade-off favors XGBoost: SHAP `TreeExplainer` works natively (precise + millisecond), the artifact is 236 KB vs Stacking's ~80 MB, inference latency is ~3× lower, and bootstrap 95% CIs for MAPE overlap. Stacking v2 is reported as an offline benchmark.
+
+XGBoost uses `tree_method='exact'` rather than the default `'hist'` — chosen for cross-process bitwise reproducibility and a measured +0.02 R² / +2.2 pp Within-10% improvement on this dataset size (~3,500 train rows). Full diagnostic + tradeoff in [`docs/Pipeline_Technical_Guide.md` §5c](docs/Pipeline_Technical_Guide.md).
 
 ### Prediction Interval Coverage (target: 90%)
 
 | Method | Coverage | Mean Width |
 |---|---|---|
 | LightGBM quantile p10–p90 *(offline benchmark)* | 49.0% | $844K |
-| **Split conformal on XGBoost — log-space** *(deployed)* | **89.3%** | **$2.09M** (multiplicative: pred × [0.57, 1.76], i.e. −43% / +76%) |
+| **Split conformal on XGBoost — log-space** *(deployed)* | **87.5%** | **$2.03M** (multiplicative: pred × [0.58, 1.73], i.e. −42% / +73%) |
 
 The naive LightGBM quantile model under-covers severely on the 2022–2025 holdout — it was trained on 2000–2021 distributions but the test mean is 2.26× larger (real post-COVID construction cost escalation, not a data issue).
 
