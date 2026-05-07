@@ -4,7 +4,7 @@ CA Affordable Housing Tax Credit Intelligence Platform
 Streamlit app — Phase 1 (3 tabs).
 
 Tab 1: Credit Estimator      — XGBoost point estimate + split-conformal interval + SHAP
-Tab 2: Market Comparables    — KNN top-10 + KMeans archetype + map
+Tab 2: Market Comparables    — KNN top-10 + Project Group lookup + map
 Tab 3: Credit Trend Analysis — statewide/county/housing-type trends
 
 Run:  streamlit run streamlit_app.py
@@ -44,7 +44,11 @@ def load_models():
     models["xgb"] = joblib.load(os.path.join(MODEL_DIR, "xgb_model.pkl"))
     models["conformal"] = joblib.load(os.path.join(MODEL_DIR, "conformal_calibration.pkl"))
     models["knn"] = joblib.load(os.path.join(MODEL_DIR, "knn_model.pkl"))
-    models["kmeans"] = joblib.load(os.path.join(MODEL_DIR, "kmeans_model.pkl"))
+    # Deterministic archetype lookup (replaced KMeans in NB04 §16). Each row is one
+    # (credit_type × housing_type × region) cell with aggregate stats.
+    models["archetype_profile"] = pd.read_parquet(
+        os.path.join(MODEL_DIR, "archetype_profile.parquet")
+    )
     models["pipeline"] = joblib.load(os.path.join(MODEL_DIR, "feature_pipeline.pkl"))
     models["config"] = joblib.load(os.path.join(MODEL_DIR, "feature_config.pkl"))
     models["shap"] = joblib.load(os.path.join(MODEL_DIR, "shap_explainer.pkl"))
@@ -158,8 +162,14 @@ def build_input_row(inputs, lookups, ppi_df):
             ppi_yoy = (ppi_val - ppi_annual[yr - 1]) / ppi_annual[yr - 1] * 100
         else:
             ppi_yoy = 3.0
+        # ppi_2yr_trend is a BINARY direction indicator in NB02 (data/02_enrich_data.ipynb:882):
+        #     (ppi_at_allocation > ppi_at_allocation.shift(2)).astype(float)
+        # An earlier version of this app computed it as a 2-year percentage change (~6.5
+        # for 2026), which the trained pipeline's StandardScaler then mapped to z ≈ +18,
+        # dominating cosine distance and crushing KNN similarity to ~32%. The fix matches
+        # the training feature exactly: 1.0 if PPI is rising vs 2 years ago, else 0.0.
         if yr - 2 in ppi_annual.index:
-            ppi_2yr = (ppi_val - ppi_annual[yr - 2]) / ppi_annual[yr - 2] * 100
+            ppi_2yr = float(ppi_val > ppi_annual[yr - 2])
         else:
             ppi_2yr = 1.0
     else:
@@ -328,38 +338,31 @@ def render_credit_estimator(models, lookups, ppi_df, inputs):
     p50 = xgb_pred
     p90 = xgb_pred * mult_high
 
-    # --- Key metrics: dollar amount + percentage ---
+    # --- Key metrics: dollar amount + percentage shift in the title ---
+    # Percentage shifts (e.g. -42% / +73%) are constant per model — the dollar
+    # width adapts to project size but the percentage is the same for every
+    # query. Showing it in the metric title avoids a duplicate `delta` field.
+    lower_label = f"Lower ({pct_low:+.0f}%)"
+    upper_label = f"Upper ({pct_high:+.0f}%)"
     col1, col2, col3 = st.columns(3)
-    col1.metric(
-        f"P{(100 - coverage_target) // 2} (Lower)",
-        f"${p10:,.0f}",
-        delta=f"{pct_low:+.0f}%",
-        delta_color="inverse",
-    )
-    col2.metric("Point estimate (XGBoost)", f"${p50:,.0f}")
-    col3.metric(
-        f"P{100 - (100 - coverage_target) // 2} (Upper)",
-        f"${p90:,.0f}",
-        delta=f"{pct_high:+.0f}%",
-        delta_color="normal",
-    )
+    col1.metric(lower_label, f"${p10:,.0f}")
+    col2.metric("Point estimate", f"${p50:,.0f}")
+    col3.metric(upper_label, f"${p90:,.0f}")
     st.caption(
-        f"Split conformal on XGBoost in **log space** — multiplicative band "
-        f"`pred × [{mult_low:.2f}, {mult_high:.2f}]` (constant {pct_low:+.0f}% / {pct_high:+.0f}% per project, "
-        f"dollar width adapts to prediction size). "
-        f"{coverage_target}% target coverage; "
-        f"{models['conformal']['coverage_test']:.1f}% achieved on the 2022–2025 test set."
+        f"There's a {coverage_target}% chance the actual award falls in this range. "
+        f"The lower and upper bounds are a constant {pct_low:+.0f}% / {pct_high:+.0f}% shift "
+        f"from the point estimate — same percentage for every project, but the dollar width grows "
+        f"with project size. On the 2022–2025 test set this range covered the actual award "
+        f"{models['conformal']['coverage_test']:.1f}% of the time."
     )
 
-    # --- Confidence range bar chart ---
-    st.subheader("Annual Federal Credit — Conformal Interval")
-    lo_label = f"P{(100 - coverage_target) // 2}"
-    hi_label = f"P{100 - (100 - coverage_target) // 2}"
+    # --- Prediction range bar chart ---
+    st.subheader("Annual Federal Credit — Prediction Range")
     fig_bar = go.Figure()
     fig_bar.add_trace(go.Bar(
-        x=[f"{lo_label}\n(Lower)", "Point\n(XGBoost)", f"{hi_label}\n(Upper)"],
+        x=[lower_label, "Point estimate", upper_label],
         y=[p10, p50, p90],
-        marker_color=["#5499c7", "#2ecc71", "#e67e22"],
+        marker_color=["#73a8cb", "#418bb0", "#184776"],
         text=[f"${p10:,.0f}", f"${p50:,.0f}", f"${p90:,.0f}"],
         textposition="outside",
     ))
@@ -380,16 +383,20 @@ def render_credit_estimator(models, lookups, ppi_df, inputs):
 
     stream_col1, stream_col2, stream_col3 = st.columns(3)
     for col, label, annual in [
-        (stream_col1, f"Lower bound ({lo_label})", p10),
+        (stream_col1, f"Lower ({pct_low:+.0f}%)", p10),
         (stream_col2, "Point estimate", p50),
-        (stream_col3, f"Upper bound ({hi_label})", p90),
+        (stream_col3, f"Upper ({pct_high:+.0f}%)", p90),
     ]:
         ten_yr = annual * 10
         equity = ten_yr * credit_price
+        # Escape every "$" as "\$" so streamlit doesn't enter LaTeX math mode
+        # (two unescaped $ on a line trigger `$...$` math, which makes the text
+        # in between render in a math font and breaks `**bold**` markers around
+        # adjacent dollar amounts). Drop bold markers to keep the bullets plain.
         col.markdown(f"**{label}**")
-        col.markdown(f"- Annual credit: **${annual:,.0f}**")
-        col.markdown(f"- 10-year stream: **${ten_yr:,.0f}**")
-        col.markdown(f"- Equity @ ${credit_price:.2f}: **${equity:,.0f}**")
+        col.markdown(f"- Annual credit: \\${annual:,.0f}")
+        col.markdown(f"- 10-year stream: \\${ten_yr:,.0f}")
+        col.markdown(f"- Equity @ \\${credit_price:.2f}: \\${equity:,.0f}")
 
     # --- Implied Eligible Basis ---
     st.subheader("Implied Eligible Basis (Cost Proxy)")
@@ -415,7 +422,7 @@ def render_credit_estimator(models, lookups, ppi_df, inputs):
 
     names = [n for n, _ in shap_top]
     values = [v for _, v in shap_top]
-    colors = ["#2ecc71" if v > 0 else "#e74c3c" for v in values]
+    colors = ["#228ecd" if v > 0 else "#e77e3c" for v in values]
 
     fig_shap = go.Figure(go.Bar(
         x=values,
@@ -455,10 +462,10 @@ def render_credit_estimator(models, lookups, ppi_df, inputs):
         "Credit Type": inputs["credit_type"],
         "Total Units": int(inputs["total_units"]),
         "PIS Year": inputs["pis_year"],
-        "Point Estimate (XGBoost)": round(p50),
-        f"Conformal Lower (P{(100 - coverage_target) // 2})": round(p10),
-        f"Conformal Upper (P{100 - (100 - coverage_target) // 2})": round(p90),
-        f"Conformal Coverage Target": f"{coverage_target}%",
+        "Point Estimate": round(p50),
+        f"Lower ({pct_low:+.0f}%)": round(p10),
+        f"Upper ({pct_high:+.0f}%)": round(p90),
+        "Coverage Target": f"{coverage_target}%",
         "10yr Point Stream": round(p50 * 10),
         "Implied Eligible Basis (Point)": round(basis_p50),
         "Implied Basis per Unit": round(basis_per_unit),
@@ -528,33 +535,117 @@ def render_comparables(models, df, lookups, ppi_df, inputs):
 
     st.dataframe(display_df, width="stretch", hide_index=True)
 
-    # --- KMeans archetype ---
-    st.subheader("Project Archetype")
-    cluster_id = models["kmeans"].predict(X)[0]
+    # --- Project Group (deterministic GroupBy on credit × housing × region) ---
+    # Replaced KMeans in NB04 §16. Looks up the user's exact (credit, housing, region)
+    # cell, with two graceful fallbacks for sparse cells (n < 10) so the UI never
+    # shows a single-project "group" with meaningless statistics.
+    st.subheader("Project Group")
+    st.caption(
+        "Historical context from CA LIHTC projects placed in service 2015–2025 — "
+        "the modern post-QAP-reform era. Earlier projects are excluded because "
+        "their award levels and project sizes don't reflect post-2015 cost realities; "
+        "for a 2026 query, a $300K award from a 2002 project is not a useful reference."
+    )
+    region = lookups["county_region"].get(inputs["county"], "Other Northern CA")
+    profile = models["archetype_profile"]
 
-    # Get archetype stats from the full scoped dataset (matches df_train above)
-    X_train_arr = np.load(os.path.join(MODEL_DIR, "X_train.npy"))
-    X_test_arr = np.load(os.path.join(MODEL_DIR, "X_test.npy"))
-    X_all = np.vstack([X_train_arr, X_test_arr])
-    all_clusters = models["kmeans"].predict(X_all)
-    cluster_mask = all_clusters == cluster_id
-    cluster_projects = df_train[cluster_mask]
+    group_match = profile[
+        (profile["credit_type"] == inputs["credit_type"]) &
+        (profile["housing_type"] == inputs["housing_type"]) &
+        (profile["region"] == region)
+    ]
+    fallback_label = None
+    if len(group_match) == 0 or group_match.iloc[0]["count"] < 10:
+        # Drop region — combine across CA for this credit+housing combo.
+        group_match = profile[
+            (profile["credit_type"] == inputs["credit_type"]) &
+            (profile["housing_type"] == inputs["housing_type"])
+        ]
+        if len(group_match) > 0:
+            fallback_label = "Statewide (region-agnostic)"
+        if group_match["count"].sum() < 10:
+            # Last fallback: housing_type only.
+            group_match = profile[profile["housing_type"] == inputs["housing_type"]]
+            fallback_label = f"All {inputs['housing_type']} projects (any credit, any region)"
 
-    if len(cluster_projects) > 0:
-        avg_credit = cluster_projects["annual_federal_award"].mean()
-        med_credit = cluster_projects["annual_federal_award"].median()
-        min_credit = cluster_projects["annual_federal_award"].min()
-        max_credit = cluster_projects["annual_federal_award"].max()
-        avg_units = cluster_projects["total_units"].mean()
-        top_county = cluster_projects["county"].mode().iloc[0] if len(cluster_projects) > 0 else "N/A"
-        top_housing = cluster_projects["housing_type"].mode().iloc[0] if len(cluster_projects) > 0 else "N/A"
+    if len(group_match) > 0:
+        # GroupBy may return multiple rows when we widen the query — re-aggregate.
+        n = int(group_match["count"].sum())
+        med_award = float((group_match["median_award"] * group_match["count"]).sum() / n)
+        p10 = float((group_match["p10_award"] * group_match["count"]).sum() / n)
+        p90 = float((group_match["p90_award"] * group_match["count"]).sum() / n)
+        med_units = float((group_match["median_units"] * group_match["count"]).sum() / n)
 
-        st.info(
-            f"**Cluster {cluster_id + 1}** — {len(cluster_projects)} similar projects in training data\n\n"
-            f"- Typical profile: **{top_housing}** in **{top_county}** area, ~{avg_units:.0f} units\n"
-            f"- Annual credit range: **${min_credit:,.0f}** – **${max_credit:,.0f}**\n"
-            f"- Median annual credit: **${med_credit:,.0f}**"
+        group_label = (
+            f"{inputs['credit_type']} {inputs['housing_type']} in {region}"
+            if fallback_label is None
+            else f"{inputs['credit_type']} {inputs['housing_type']} ({fallback_label})"
         )
+        # Escape "$" as "\$" so streamlit's markdown engine doesn't treat them as
+        # LaTeX math delimiters. Bullets split lower/upper end into their own lines
+        # to mirror the user-friendly column names used in the expander table below
+        # ("Lower end award (p10)" / "Upper end award (p90)") so the inline summary
+        # and the full table use the same vocabulary.
+        st.info(
+            f"**{group_label}** — {n:,} historical projects (2015–2025)\n\n"
+            f"- Typical size: ~{med_units:.0f} units\n"
+            f"- Median annual credit: \\${med_award:,.0f}\n"
+            f"- Lower end award (p10): \\${p10:,.0f}\n"
+            f"- Upper end award (p90): \\${p90:,.0f}"
+        )
+    else:
+        st.warning(
+            "No historical projects (2015–2025) match this group closely. "
+            "Treat the point estimate above with extra caution."
+        )
+
+    # --- Show all CA LIHTC project groups for context (collapsed by default) ---
+    with st.expander(f"See all {len(profile)} CA LIHTC project groups for context"):
+        st.caption(
+            "Each row is one (credit × housing × region) cell with its aggregate stats "
+            "from 2015–2025. The lower-end / upper-end columns are the 10th and 90th "
+            "percentiles of award in each cell — 80% of historical projects in that "
+            "cell sit between them. Your project group is highlighted."
+        )
+        # Highlight the user's project-group row(s) — must be computed against
+        # the original column names BEFORE the rename below.
+        user_mask = (
+            (profile["credit_type"] == inputs["credit_type"]) &
+            (profile["housing_type"] == inputs["housing_type"]) &
+            (profile["region"] == region)
+        )
+        display_profile = profile[[
+            "credit_type", "housing_type", "region",
+            "count", "median_award", "p10_award", "p90_award",
+            "median_units", "median_year",
+        ]].rename(columns={
+            "credit_type":  "Credit",
+            "housing_type": "Housing",
+            "region":       "Region",
+            "count":        "Count",
+            "median_award": "Median award",
+            "p10_award":    "Lower end award (p10)",
+            "p90_award":    "Upper end award (p90)",
+            "median_units": "Median units",
+            "median_year":  "Median year",
+        })
+        styled = (
+            display_profile.style
+            .hide(axis="index")
+            .format({
+                "Count":                  "{:,d}",
+                "Median award":           "${:,.0f}",
+                "Lower end award (p10)":  "${:,.0f}",
+                "Upper end award (p90)":  "${:,.0f}",
+                "Median units":           "{:.0f}",
+                "Median year":            "{:.0f}",
+            })
+            .apply(
+                lambda r: ["background-color: #fff3cd" if user_mask.iloc[r.name] else ""] * len(r),
+                axis=1,
+            )
+        )
+        st.dataframe(styled, width="stretch", hide_index=True)
 
     # --- Trend chart: credit per unit over time for this county + housing type ---
     st.subheader("Credit Trend — Your County & Housing Type")
@@ -608,7 +699,7 @@ def render_comparables(models, df, lookups, ppi_df, inputs):
         color="type",
         hover_name="project_name",
         hover_data={"county": True, "pis_year": True, "lat": False, "lon": False},
-        color_discrete_map={"Comparable": "#5499c7", "Your Project": "#e74c3c"},
+        color_discrete_map={"Comparable": "#5499c7", "Your Project": "#df7020"},
         size_max=15,
         zoom=5,
         center={"lat": 36.7, "lon": -119.8},
@@ -651,7 +742,7 @@ def render_trends(df):
             "median_cpu": "Median Credit per Unit ($)",
             "credit_type": "Credit Type",
         },
-        color_discrete_map={"9%": "#2ecc71", "4%": "#5499c7"},
+        color_discrete_map={"9%": "#df7020", "4%": "#5499c7"},
     )
     fig_state.update_layout(yaxis_tickformat="$,.0f")
     st.plotly_chart(fig_state, width="stretch")
@@ -715,7 +806,7 @@ def render_trends(df):
     fig_ami = px.bar(
         ami_trend, x="Year", y="Avg Deep AMI %",
         labels={"Avg Deep AMI %": "Avg % Units at ≤30% AMI"},
-        color_discrete_sequence=["#8e44ad"],
+        color_discrete_sequence=["#5499c7"],
     )
     fig_ami.update_layout(yaxis_tickformat=".1f")
     st.plotly_chart(fig_ami, width="stretch")
@@ -726,7 +817,7 @@ def render_trends(df):
     fig_vol = px.bar(
         vol, x="pis_year", y="Projects",
         labels={"pis_year": "Year", "Projects": "Number of Projects"},
-        color_discrete_sequence=["#1abc9c"],
+        color_discrete_sequence=["#5499c7"],
     )
     st.plotly_chart(fig_vol, width="stretch")
 

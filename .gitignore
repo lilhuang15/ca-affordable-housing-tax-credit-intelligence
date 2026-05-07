@@ -66,6 +66,10 @@ CLAUDE.md
 data/03_feature.ipynb
 data/03_feature_engineering_v2.ipynb
 data/04_Notes_modeling.ipynb
+streamlit_app_phase2_notes.py
+streamlit_app_notes.py
+LH_app.py
+
 
 # --- Archived prior versions ---
 archive/

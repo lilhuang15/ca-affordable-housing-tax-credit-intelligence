@@ -83,7 +83,9 @@ def models():
     m["xgb"] = joblib.load(os.path.join(MODEL_DIR, "xgb_model.pkl"))
     m["quantile"] = joblib.load(os.path.join(MODEL_DIR, "credit_quantile.pkl"))
     m["knn"] = joblib.load(os.path.join(MODEL_DIR, "knn_model.pkl"))
-    m["kmeans"] = joblib.load(os.path.join(MODEL_DIR, "kmeans_model.pkl"))
+    m["archetype_profile"] = pd.read_parquet(
+        os.path.join(MODEL_DIR, "archetype_profile.parquet")
+    )
     m["pipeline"] = joblib.load(os.path.join(MODEL_DIR, "feature_pipeline.pkl"))
     m["config"] = joblib.load(os.path.join(MODEL_DIR, "feature_config.pkl"))
     m["shap"] = joblib.load(os.path.join(MODEL_DIR, "shap_explainer.pkl"))
@@ -148,11 +150,11 @@ def sample_inputs():
 # Test 1: All models load
 # ---------------------------------------------------------------------------
 def test_load_models(models):
-    """All 7 model artifacts must load successfully."""
+    """All artifacts the app loads at startup must be available."""
     assert "xgb" in models
     assert "quantile" in models
     assert "knn" in models
-    assert "kmeans" in models
+    assert "archetype_profile" in models   # GroupBy archetype lookup (replaced KMeans)
     assert "pipeline" in models
     assert "config" in models
     assert "shap" in models
@@ -243,13 +245,27 @@ def test_knn_comparables(models, sample_inputs, lookups, ppi_df):
 # ---------------------------------------------------------------------------
 # Test 7: KMeans assigns a valid cluster
 # ---------------------------------------------------------------------------
-def test_kmeans_archetype(models, sample_inputs, lookups, ppi_df):
-    """KMeans must assign the project to a cluster between 0 and 5."""
-    row = build_input_row(sample_inputs, lookups, ppi_df)
-    X = models["pipeline"].transform(row)
+def test_archetype_groupby(models, sample_inputs, lookups):
+    """The user's (credit, housing, region) cell must resolve to a populated archetype row.
 
-    cluster_id = models["kmeans"].predict(X)[0]
-    assert 0 <= cluster_id < 6, f"Cluster {cluster_id} out of range [0, 5]"
+    Replaces test_kmeans_archetype after KMeans was removed in NB04 §16. The
+    deterministic archetype lookup is what the Streamlit Comparables tab joins
+    against, so we verify the join succeeds for the default sidebar inputs.
+    """
+    profile = models["archetype_profile"]
+    region = lookups["county_region"][sample_inputs["county"]]
+    match = profile[
+        (profile["credit_type"] == sample_inputs["credit_type"]) &
+        (profile["housing_type"] == sample_inputs["housing_type"]) &
+        (profile["region"] == region)
+    ]
+    assert len(match) == 1, (
+        f"Expected exactly one archetype row for "
+        f"({sample_inputs['credit_type']}, {sample_inputs['housing_type']}, {region}), "
+        f"got {len(match)}"
+    )
+    assert match.iloc[0]["count"] > 0
+    assert match.iloc[0]["median_award"] > 0
 
 
 # ---------------------------------------------------------------------------

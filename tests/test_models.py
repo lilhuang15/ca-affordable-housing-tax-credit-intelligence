@@ -44,8 +44,9 @@ test_knn_returns_neighbors
     KNN should return exactly 10 neighbors for a query. If it returns
     fewer, the model wasn't fit on enough data.
 
-test_kmeans_cluster_count
-    KMeans should produce exactly 6 clusters (as configured in NB04).
+test_archetype_profile_loads
+    The GroupBy archetype profile (replaced KMeans in NB04 §16) must exist
+    and be well-formed: required columns, full coverage, monotone p10 <= p90.
 
 test_stacking_loads_and_predicts
     The Stacking ensemble (the largest model at 150MB) must load and
@@ -101,7 +102,7 @@ MODEL_FILES = [
     'ridge_model.pkl',              # Ridge baseline
     'credit_quantile.pkl',          # LightGBM p10/p50/p90 dict (offline benchmark)
     'knn_model.pkl',                # KNN for comparables
-    'kmeans_model.pkl',             # KMeans for archetypes
+    'archetype_profile.parquet',    # GroupBy archetype lookup (replaced KMeans)
     'shap_explainer.pkl',           # SHAP TreeExplainer
     'feature_pipeline.pkl',         # ColumnTransformer
 ]
@@ -208,10 +209,44 @@ def test_knn_returns_neighbors(test_data):
 # ---------------------------------------------------------------------------
 # Test 8: KMeans has correct number of clusters
 # ---------------------------------------------------------------------------
-def test_kmeans_cluster_count():
-    """KMeans should have exactly 6 cluster centers."""
-    kmeans = joblib.load(os.path.join(MODEL_DIR, 'kmeans_model.pkl'))
-    assert kmeans.n_clusters == 6, f'Expected 6 clusters, got {kmeans.n_clusters}'
+def test_archetype_profile_loads():
+    """The GroupBy project-group profile (replaces KMeans) must exist and be well-formed.
+
+    Each row is one (credit_type × housing_type × region) cell with aggregate stats
+    from the 2015–2025 subset of the data — earlier projects were excluded in
+    NB04 §16 because their award levels and project sizes don't match
+    post-QAP-reform realities. The Streamlit Comparables tab joins against this
+    table at query time.
+    """
+    profile = pd.read_parquet(os.path.join(MODEL_DIR, 'archetype_profile.parquet'))
+
+    expected_cols = {
+        'credit_type', 'housing_type', 'region',
+        'count', 'median_award', 'p10_award', 'p90_award',
+        'median_units', 'median_year', 'archetype_key',
+    }
+    missing = expected_cols - set(profile.columns)
+    assert not missing, f'archetype_profile missing columns: {missing}'
+
+    assert len(profile) > 5, f'Suspiciously few project groups: {len(profile)}'
+    # Profile is built from the 2015+ subset of the scoped 2000-2025 dataset
+    # (~2,123 of 4,387 rows). This bound catches both an empty/broken table and
+    # an accidental drop of the time filter (which would push count back past
+    # 3,500 and re-introduce the misleading $300-400k p10 floor from 2000s deals).
+    n_covered = int(profile['count'].sum())
+    assert 1500 <= n_covered <= 2500, (
+        f'project-group rows cover {n_covered} projects; '
+        f'expected ~2,100 from the 2015-2025 subset of the scoped data. '
+        f'If this drifted, check the ARCHETYPE_YEAR_CUTOFF in NB04 §16.'
+    )
+    assert int(profile['median_year'].min()) >= 2015, (
+        f'median_year minimum {int(profile["median_year"].min())} '
+        f'is below the 2015 time-filter cutoff'
+    )
+
+    assert profile['archetype_key'].is_unique, 'archetype_key must uniquely identify each row'
+    assert (profile['median_award'] > 0).all(), 'median_award should always be positive'
+    assert (profile['p10_award'] <= profile['p90_award']).all(), 'p10 must be <= p90'
 
 
 # ---------------------------------------------------------------------------
