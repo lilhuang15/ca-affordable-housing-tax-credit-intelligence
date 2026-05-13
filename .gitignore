@@ -76,3 +76,18 @@ archive/
 
 # --- Draft / WIP scratch files (local only) ---
 draft/
+
+# --- Deployment whitelist: files the deployed Streamlit app needs to load ---
+# These override the broad data/* and models/* ignores above. Order matters
+# in .gitignore — later rules win.
+!models/xgb_model.pkl
+!models/conformal_calibration.pkl
+!models/knn_model.pkl
+!models/feature_pipeline.pkl
+!models/feature_config.pkl
+!models/shap_explainer.pkl
+!models/archetype_profile.parquet
+!models/train_data.parquet
+!models/test_data.parquet
+!models/df_all_scoped.parquet
+!data/fred_ppi.csv
