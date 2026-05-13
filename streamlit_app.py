@@ -1,11 +1,12 @@
 """
 CA Affordable Housing Tax Credit Intelligence Platform
 ======================================================
-Streamlit app — Phase 1 (3 tabs).
+Streamlit app — Phase 1 (4 tabs).
 
 Tab 1: Credit Estimator      — XGBoost point estimate + split-conformal interval + SHAP
 Tab 2: Market Comparables    — KNN top-10 + Project Group lookup + map
 Tab 3: Credit Trend Analysis — statewide/county/housing-type trends
+Tab 4: Method Insight        — time-split, distribution shift, fit, SHAP, conformal coverage
 
 Run:  streamlit run streamlit_app.py
 """
@@ -18,14 +19,23 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from theme import (
+    inject_theme,
+    render_masthead,
+    CHART_COLORS,
+    HOUSING_TYPE_COLORS,
+    PALETTE,
+)
+
 # ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
 st.set_page_config(
     page_title="CA LIHTC Credit Intelligence",
-    page_icon="🏠",
+    page_icon="◆",
     layout="wide",
 )
+inject_theme()
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -62,13 +72,24 @@ def load_model_comparison():
 
 
 @st.cache_data
-def load_project_data():
-    """Load the scoped project data (train + test) for comparables and trends."""
+def load_project_splits():
+    """Load the scoped train and test sets separately.
+
+    Tab 4 (Method Insight) uses the splits directly; Tab 2/3 use the concatenated
+    view via load_project_data, which is a thin wrapper around this function.
+    """
     df_train = pd.read_parquet(os.path.join(MODEL_DIR, "train_data.parquet"))
     df_test = pd.read_parquet(os.path.join(MODEL_DIR, "test_data.parquet"))
-    df = pd.concat([df_train, df_test], ignore_index=True)
-    df["county"] = df["county"].str.strip().str.title()
-    return df
+    df_train["county"] = df_train["county"].str.strip().str.title()
+    df_test["county"] = df_test["county"].str.strip().str.title()
+    return df_train, df_test
+
+
+@st.cache_data
+def load_project_data():
+    """Load the scoped project data (train + test) for comparables and trends."""
+    df_train, df_test = load_project_splits()
+    return pd.concat([df_train, df_test], ignore_index=True)
 
 
 @st.cache_data
@@ -226,6 +247,67 @@ def get_shap_explanation(models, X_transformed, feature_names, top_n=8):
 
 
 # ---------------------------------------------------------------------------
+# Method Insight: cached compute helpers
+# ---------------------------------------------------------------------------
+# These compute test-set diagnostics once per session and cache the result so
+# Tab 4 paints quickly. The leading underscore on `_models` / `_df_test` opts
+# the argument out of @st.cache_data hashing — the models dict and DataFrame
+# don't have stable hashes, but they're identity-stable for the session.
+@st.cache_data
+def compute_test_predictions(_models, _df_test):
+    """Run the deployed XGBoost on the held-out test set and apply the
+    split-conformal multipliers. Returns a single tidy frame used by both
+    the Actual-vs-Predicted chart and the Conformal Coverage chart."""
+    pipeline = _models["pipeline"]
+    xgb = _models["xgb"]
+    conf = _models["conformal"]
+
+    X = pipeline.transform(_df_test)
+    pred_log = xgb.predict(X)
+    pred = np.expm1(pred_log)
+    actual = _df_test["annual_federal_award"].to_numpy()
+
+    lower = pred * conf["multiplier_low"]
+    upper = pred * conf["multiplier_high"]
+    in_interval = (actual >= lower) & (actual <= upper)
+
+    return pd.DataFrame({
+        "pis_year": _df_test["pis_year"].to_numpy(),
+        "actual": actual,
+        "predicted": pred,
+        "log_residual": np.log1p(actual) - pred_log,
+        "lower": lower,
+        "upper": upper,
+        "in_interval": in_interval,
+    })
+
+
+@st.cache_data
+def compute_global_shap(_models, _df_test, n_sample=200, seed=42):
+    """Mean |SHAP| across a 200-row sample of the test set — the static
+    counterpart to the per-prediction SHAP shown in Tab 1. Sampling keeps
+    first-paint under ~3 s; the cached result is reused on every Tab 4 visit."""
+    pipeline = _models["pipeline"]
+    explainer = _models["shap"]
+    feature_names = _models["config"]["feature_names_out"]
+
+    sample = _df_test.sample(n=min(n_sample, len(_df_test)), random_state=seed)
+    X = pipeline.transform(sample)
+    shap_vals = explainer.shap_values(X)
+    mean_abs = np.abs(shap_vals).mean(axis=0)
+
+    df = pd.DataFrame({
+        "feature": feature_names,
+        "mean_abs_shap": mean_abs,
+    })
+    # Strip ColumnTransformer prefixes so the bar labels read cleanly.
+    df["display_name"] = df["feature"].str.replace(
+        r"^(num__|te__|ohe__)", "", regex=True
+    ).str.replace("_", " ").str.title()
+    return df.sort_values("mean_abs_shap", ascending=False).reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
 # Sidebar: shared project inputs
 # ---------------------------------------------------------------------------
 def render_sidebar(lookups):
@@ -362,7 +444,7 @@ def render_credit_estimator(models, lookups, ppi_df, inputs):
     fig_bar.add_trace(go.Bar(
         x=[lower_label, "Point estimate", upper_label],
         y=[p10, p50, p90],
-        marker_color=["#73a8cb", "#418bb0", "#184776"],
+        marker_color=[CHART_COLORS["lower"], CHART_COLORS["point"], CHART_COLORS["upper"]],
         text=[f"${p10:,.0f}", f"${p50:,.0f}", f"${p90:,.0f}"],
         textposition="outside",
     ))
@@ -422,7 +504,7 @@ def render_credit_estimator(models, lookups, ppi_df, inputs):
 
     names = [n for n, _ in shap_top]
     values = [v for _, v in shap_top]
-    colors = ["#228ecd" if v > 0 else "#e77e3c" for v in values]
+    colors = [CHART_COLORS["positive"] if v > 0 else CHART_COLORS["negative"] for v in values]
 
     fig_shap = go.Figure(go.Bar(
         x=values,
@@ -641,7 +723,7 @@ def render_comparables(models, df, lookups, ppi_df, inputs):
                 "Median year":            "{:.0f}",
             })
             .apply(
-                lambda r: ["background-color: #fff3cd" if user_mask.iloc[r.name] else ""] * len(r),
+                lambda r: [f"background-color: {PALETTE['paper_alt']}; color: {PALETTE['oxblood_dk']}; font-weight: 600" if user_mask.iloc[r.name] else ""] * len(r),
                 axis=1,
             )
         )
@@ -699,7 +781,7 @@ def render_comparables(models, df, lookups, ppi_df, inputs):
         color="type",
         hover_name="project_name",
         hover_data={"county": True, "pis_year": True, "lat": False, "lon": False},
-        color_discrete_map={"Comparable": "#5499c7", "Your Project": "#df7020"},
+        color_discrete_map={"Comparable": PALETTE["navy"], "Your Project": PALETTE["oxblood"]},
         size_max=15,
         zoom=5,
         center={"lat": 36.7, "lon": -119.8},
@@ -742,7 +824,7 @@ def render_trends(df):
             "median_cpu": "Median Credit per Unit ($)",
             "credit_type": "Credit Type",
         },
-        color_discrete_map={"9%": "#df7020", "4%": "#5499c7"},
+        color_discrete_map={"9%": PALETTE["oxblood"], "4%": PALETTE["navy"]},
     )
     fig_state.update_layout(yaxis_tickformat="$,.0f")
     st.plotly_chart(fig_state, width="stretch")
@@ -792,24 +874,11 @@ def render_trends(df):
             "median_cpu": "Median Credit per Unit ($)",
             "housing_type": "Housing Type",
         },
+        color_discrete_map=HOUSING_TYPE_COLORS,
     )
+    fig_ht.update_traces(line=dict(width=2.2), marker=dict(size=7))
     fig_ht.update_layout(yaxis_tickformat="$,.0f")
     st.plotly_chart(fig_ht, width="stretch")
-
-    # --- AMI depth trend ---
-    st.subheader("Deep Affordability Targeting Over Time")
-    st.caption("Average share of units targeting ≤30% AMI households, by year.")
-    ami_trend = df.groupby("pis_year")["deep_ami_pct"].mean().reset_index()
-    ami_trend.columns = ["Year", "Avg Deep AMI %"]
-    ami_trend["Avg Deep AMI %"] *= 100
-
-    fig_ami = px.bar(
-        ami_trend, x="Year", y="Avg Deep AMI %",
-        labels={"Avg Deep AMI %": "Avg % Units at ≤30% AMI"},
-        color_discrete_sequence=["#5499c7"],
-    )
-    fig_ami.update_layout(yaxis_tickformat=".1f")
-    st.plotly_chart(fig_ami, width="stretch")
 
     # --- Volume over time ---
     st.subheader("Project Volume by Year")
@@ -817,9 +886,274 @@ def render_trends(df):
     fig_vol = px.bar(
         vol, x="pis_year", y="Projects",
         labels={"pis_year": "Year", "Projects": "Number of Projects"},
-        color_discrete_sequence=["#5499c7"],
+        color_discrete_sequence=[PALETTE["navy"]],
     )
     st.plotly_chart(fig_vol, width="stretch")
+
+
+# ---------------------------------------------------------------------------
+# Tab 4: Method Insight
+# ---------------------------------------------------------------------------
+TRAIN_END_YEAR = 2021  # the boundary used by NB03's time-based split
+
+
+def _render_train_test_timeline(df_train, df_test):
+    """§1 chart 1 — Gantt-style horizontal bar showing the 2000–2021 train
+    window vs the 2022–2025 test window. Establishes 'time-based split, not
+    random' before the distribution-shift chart that follows."""
+    train_start, train_end = int(df_train["pis_year"].min()), int(df_train["pis_year"].max())
+    test_start, test_end = int(df_test["pis_year"].min()), int(df_test["pis_year"].max())
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        y=["Train"], x=[train_end - train_start + 1], base=[train_start],
+        orientation="h", marker_color=PALETTE["deep"],
+        text=[f"  n = {len(df_train):,}  ·  {train_end - train_start + 1} yrs  "],
+        textposition="inside", insidetextanchor="middle",
+        textfont=dict(color=PALETTE["paper"], size=12),
+        hovertemplate=f"Train · {train_start}–{train_end} · n={len(df_train):,}<extra></extra>",
+        showlegend=False,
+    ))
+    fig.add_trace(go.Bar(
+        y=["Test"], x=[test_end - test_start + 1], base=[test_start],
+        orientation="h", marker_color=PALETTE["signal"],
+        text=[f"  n = {len(df_test):,}  ·  {test_end - test_start + 1} yrs  "],
+        textposition="inside", insidetextanchor="middle",
+        textfont=dict(color=PALETTE["paper"], size=12),
+        hovertemplate=f"Test · {test_start}–{test_end} · n={len(df_test):,}<extra></extra>",
+        showlegend=False,
+    ))
+    fig.update_layout(
+        height=220,
+        xaxis=dict(range=[train_start - 0.5, test_end + 0.5], dtick=2, title="Placed-in-Service Year"),
+        yaxis=dict(categoryorder="array", categoryarray=["Test", "Train"]),
+        margin=dict(l=20, r=20, t=20, b=50),
+        bargap=0.4,
+    )
+    st.plotly_chart(fig, width="stretch")
+    st.caption(
+        "Time-based split — earlier years train, later years test. A random shuffle "
+        "would leak future information into past predictions; this is a forecasting "
+        "problem."
+    )
+
+
+def _render_distribution_shift(df_train, df_test):
+    """§1 chart 2 — anchor figure of the methodology story. Median annual
+    federal award by year, with each bar colored by train/test membership.
+    The visual jump in 2022 is the central technical challenge."""
+    df = pd.concat([df_train, df_test], ignore_index=True)
+    yearly = (
+        df.groupby("pis_year")["annual_federal_award"]
+        .median().reset_index()
+        .sort_values("pis_year")
+    )
+    colors = [
+        PALETTE["deep"] if y <= TRAIN_END_YEAR else PALETTE["signal"]
+        for y in yearly["pis_year"]
+    ]
+
+    train_mean = df_train["annual_federal_award"].mean()
+    test_mean = df_test["annual_federal_award"].mean()
+    shift_ratio = test_mean / train_mean
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=yearly["pis_year"], y=yearly["annual_federal_award"] / 1e6,
+        marker_color=colors,
+        hovertemplate="Year %{x}<br>Median award: $%{y:.2f}M<extra></extra>",
+        showlegend=False,
+    ))
+    # Train/test boundary marker.
+    fig.add_vline(
+        x=TRAIN_END_YEAR + 0.5,
+        line=dict(color=PALETTE["ink_mute"], width=1, dash="dash"),
+        annotation_text="Train / Test split",
+        annotation_position="top right",
+        annotation=dict(font_size=11, font_color=PALETTE["ink_soft"]),
+    )
+    # Manual legend traces (invisible bars at zero just to register the keys).
+    fig.add_trace(go.Bar(
+        x=[None], y=[None], marker_color=PALETTE["deep"],
+        name=f"Train (≤{TRAIN_END_YEAR})", showlegend=True,
+    ))
+    fig.add_trace(go.Bar(
+        x=[None], y=[None], marker_color=PALETTE["signal"],
+        name=f"Test (≥{TRAIN_END_YEAR + 1})", showlegend=True,
+    ))
+    fig.update_layout(
+        height=380,
+        xaxis_title="Placed-in-Service Year",
+        yaxis_title="Median Annual Federal Credit ($M)",
+        yaxis_tickformat="$.2fM",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=20, r=20, t=40, b=50),
+    )
+    st.plotly_chart(fig, width="stretch")
+    st.caption(
+        f"Test mean is **{shift_ratio:.2f}×** the train mean — post-COVID construction-cost "
+        f"escalation. Bounds calibrated only to historical data systematically under-cover "
+        f"modern projects, which is why the deployed interval uses split conformal (§3) "
+        f"rather than naive quantile regression."
+    )
+
+
+def _render_actual_vs_predicted(preds, model_comparison):
+    """§2 chart 1 — Plotly scatter of test-set predictions on log-log axes,
+    colored by year so the post-2022 drift below the diagonal is visible.
+    Title carries R²/MAPE/within-10% from model_comparison.csv for trust."""
+    xgb_row = model_comparison[model_comparison["Model"] == "XGBoost"].iloc[0]
+    r2 = xgb_row["R2"]
+    mape = xgb_row["MAPE (%)"]
+
+    fig = px.scatter(
+        preds, x="actual", y="predicted", color="pis_year",
+        color_continuous_scale="Plasma", opacity=0.6,
+        labels={"actual": "Actual Award ($)", "predicted": "Predicted Award ($)", "pis_year": "PIS Year"},
+    )
+    fig.update_traces(marker=dict(size=6))
+
+    # Linear axes with evenly spaced $1M ticks ($0 to $8M covers test set spread
+    # of ~$220K – $7.4M). Linear (not log) so tick *intervals* are equal — the
+    # earlier log-decade ticks were unevenly spaced (10× per step) and confusing.
+    axis_max = 8e6
+    tick_step = 1e6
+    tickvals = [i * tick_step for i in range(int(axis_max / tick_step) + 1)]
+    ticktext = [f"${int(v / 1e6)}M" if v > 0 else "$0" for v in tickvals]
+    linear_axis = dict(
+        tickmode="array",
+        tickvals=tickvals,
+        ticktext=ticktext,
+        range=[0, axis_max],
+    )
+
+    # y = x reference line spanning the full plot, drawn AFTER axes so it
+    # picks up the linear range cleanly.
+    fig.add_trace(go.Scatter(
+        x=[0, axis_max], y=[0, axis_max], mode="lines",
+        line=dict(color=PALETTE["ink_mute"], dash="dash", width=1),
+        name="y = x", showlegend=False, hoverinfo="skip",
+    ))
+    fig.update_layout(
+        height=460,
+        title=f"XGBoost on 2022–2025 test set  ·  R² = {r2:.2f}  ·  MAPE = {mape:.1f}%",
+        margin=dict(l=60, r=20, t=70, b=60),
+    )
+    fig.update_xaxes(**linear_axis)
+    fig.update_yaxes(**linear_axis)
+    st.plotly_chart(fig, width="stretch")
+    st.caption(
+        "Each point is one held-out 2022–2025 project. Points below the diagonal = model "
+        "under-predicted; above = over-predicted. The systematic drift of recent (lighter) "
+        "points reflects the distribution shift seen in §1."
+    )
+
+
+def _render_global_shap(shap_df, n_sample, top_n=15):
+    """§2 chart 2 — top-N features by mean |SHAP|, sorted descending.
+    The static counterpart to the per-prediction SHAP shown in Tab 1."""
+    top = shap_df.head(top_n).copy()
+
+    fig = go.Figure(go.Bar(
+        x=top["mean_abs_shap"][::-1],
+        y=top["display_name"][::-1],
+        orientation="h",
+        marker_color=PALETTE["deep"],
+        text=[f"{v:.3f}" for v in top["mean_abs_shap"][::-1]],
+        textposition="outside",
+        hovertemplate="%{y}<br>mean |SHAP| = %{x:.4f}<extra></extra>",
+    ))
+    fig.update_layout(
+        height=max(360, top_n * 28),
+        xaxis_title="Mean |SHAP|  (impact on log-credit prediction)",
+        yaxis=dict(autorange=None),  # already pre-reversed
+        margin=dict(l=20, r=60, t=30, b=50),
+    )
+    st.plotly_chart(fig, width="stretch")
+    st.caption(
+        f"Mean absolute SHAP across {n_sample} test samples. Higher = bigger average "
+        f"impact on the log-credit prediction. The county target-encoding and total-units "
+        f"features dominate; macro PPI and FMR features show up but smaller."
+    )
+
+
+def _render_conformal_coverage(preds, conformal):
+    """§3 — the deployed prediction interval, applied to the 2022–2025 test
+    set. Each x-position is one project sorted by actual; the shaded band is
+    the 90% conformal interval around the XGBoost point estimate; black dots
+    are realized awards. Coverage = the fraction of dots inside the band."""
+    sorted_preds = preds.sort_values("actual").reset_index(drop=True)
+    x = np.arange(len(sorted_preds))
+    coverage = sorted_preds["in_interval"].mean() * 100
+    target = int(round((1 - conformal["alpha"]) * 100))
+    mult_low = conformal["multiplier_low"]
+    mult_high = conformal["multiplier_high"]
+
+    fig = go.Figure()
+    # Upper bound (invisible line, anchor for fill).
+    fig.add_trace(go.Scatter(
+        x=x, y=sorted_preds["upper"] / 1e6, mode="lines",
+        line=dict(color="rgba(0,0,0,0)"), showlegend=False, hoverinfo="skip",
+    ))
+    # Lower bound + fill to the upper trace.
+    fig.add_trace(go.Scatter(
+        x=x, y=sorted_preds["lower"] / 1e6, mode="lines",
+        line=dict(color="rgba(0,0,0,0)"),
+        fill="tonexty", fillcolor="rgba(168, 200, 224, 0.35)",
+        name=f"{target}% conformal band  ·  pred × [{mult_low:.2f}, {mult_high:.2f}]",
+        hoverinfo="skip",
+    ))
+    # XGBoost point estimate.
+    fig.add_trace(go.Scatter(
+        x=x, y=sorted_preds["predicted"] / 1e6, mode="lines",
+        line=dict(color=PALETTE["deep"], width=1.4), name="XGBoost point estimate",
+        hovertemplate="Predicted: $%{y:.2f}M<extra></extra>",
+    ))
+    # Actual awards.
+    fig.add_trace(go.Scatter(
+        x=x, y=sorted_preds["actual"] / 1e6, mode="markers",
+        marker=dict(color=PALETTE["ink"], size=4, opacity=0.7),
+        name="Actual award",
+        hovertemplate="Actual: $%{y:.2f}M<extra></extra>",
+    ))
+    fig.update_layout(
+        height=440,
+        title=f"Split Conformal on XGBoost  ·  {coverage:.1f}% coverage on a {target}% target interval",
+        xaxis_title="Test observations (sorted by actual award)",
+        yaxis_title="Annual Federal Credit ($M)",
+        yaxis_tickformat="$.1fM",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=20, r=20, t=70, b=50),
+    )
+    st.plotly_chart(fig, width="stretch")
+    st.caption(
+        f"Each x-position is one of {len(sorted_preds)} held-out 2022–2025 projects, sorted "
+        f"by realized award. The blue band is the 90% prediction interval the Estimator "
+        f"tab shows users. Calibrated on 2020–2021 holdout residuals (n = {conformal['n_cal']}); "
+        f"on the test set it covers {coverage:.1f}% of actuals — close to the {target}% nominal "
+        f"target despite a 2.26× distribution shift."
+    )
+
+
+def render_method_insight(models, df_train, df_test, model_comparison):
+    st.header("Method Insight")
+    st.caption("How the model was built and validated — for the technical reader.")
+
+    # § 1
+    st.subheader("§ 1   Data & The Time-Split Decision")
+    _render_train_test_timeline(df_train, df_test)
+    _render_distribution_shift(df_train, df_test)
+
+    # § 2
+    st.subheader("§ 2   Modeling — Does It Fit?")
+    preds = compute_test_predictions(models, df_test)
+    _render_actual_vs_predicted(preds, model_comparison)
+    shap_df = compute_global_shap(models, df_test)
+    _render_global_shap(shap_df, n_sample=200)
+
+    # § 3
+    st.subheader("§ 3   Uncertainty Quantification")
+    _render_conformal_coverage(preds, models["conformal"])
 
 
 # ---------------------------------------------------------------------------
@@ -859,14 +1193,20 @@ def render_model_card(models, model_comparison):
 # Main
 # ---------------------------------------------------------------------------
 def main():
-    st.title("CA Affordable Housing Tax Credit Intelligence")
-    st.markdown(
-        "Predict annual federal LIHTC credit allocations for California projects "
-        "— with confidence ranges, cost proxies, and market comparables."
+    render_masthead(
+        title_main="Affordable Housing",
+        title_em="Tax Credit Intelligence",
+        dek=(
+            "Forecasting annual federal LIHTC allocations for California — "
+            "with calibrated prediction intervals, cost proxies, and market comparables, "
+            "drawn from twenty-five years of CTCAC filings."
+        ),
+        kicker="California · LIHTC Intelligence",
     )
 
     # Load everything
     models = load_models()
+    df_train, df_test = load_project_splits()
     df = load_project_data()
     ppi_df = load_ppi()
     lookups = build_lookups(df)
@@ -876,10 +1216,11 @@ def main():
     inputs = render_sidebar(lookups)
 
     # Tabs
-    tab1, tab2, tab3 = st.tabs([
-        "💰 Credit Estimator",
-        "🏘️ Market Comparables",
-        "📈 Credit Trends",
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "I · Estimator",
+        "II · Comparables",
+        "III · Trends",
+        "IV · Method Insight",
     ])
 
     with tab1:
@@ -890,6 +1231,9 @@ def main():
 
     with tab3:
         render_trends(df)
+
+    with tab4:
+        render_method_insight(models, df_train, df_test, model_comparison)
 
     # Model card at the bottom
     render_model_card(models, model_comparison)

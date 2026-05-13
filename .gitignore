@@ -73,3 +73,6 @@ LH_app.py
 
 # --- Archived prior versions ---
 archive/
+
+# --- Draft / WIP scratch files (local only) ---
+draft/

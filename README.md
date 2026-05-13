@@ -31,7 +31,6 @@ Given a project's characteristics (county, size, unit mix, credit type, housing 
 
 XGBoost is the **deployed point model**, not Stacking v2. Although the stack is ~0.4pp better on MAPE, the deployment trade-off favors XGBoost: SHAP `TreeExplainer` works natively (precise + millisecond), the artifact is 236 KB vs Stacking's ~80 MB, inference latency is ~3× lower, and bootstrap 95% CIs for MAPE overlap. Stacking v2 is reported as an offline benchmark.
 
-XGBoost uses `tree_method='exact'` rather than the default `'hist'` — chosen for cross-process bitwise reproducibility and a measured +0.02 R² / +2.2 pp Within-10% improvement on this dataset size (~3,500 train rows).
 
 ### Prediction Interval Coverage (target: 90%)
 
