@@ -119,12 +119,22 @@ def build_lookups(_df):
     # Sorted county list
     counties = sorted(_df["county"].dropna().unique())
 
+    # Statewide medians — used only as fallback when an unknown county slips through
+    default_region = _df["region"].mode()[0]
+    default_fmr = float(_df["fmr_2br"].median())
+    default_income = float(_df["county_median_income"].median())
+    default_rent = float(_df["county_median_rent"].median())
+
     return {
         "county_region": county_region,
         "county_fmr": county_fmr,
         "county_income": county_income,
         "county_rent": county_rent,
         "counties": counties,
+        "default_region": default_region,
+        "default_fmr": default_fmr,
+        "default_income": default_income,
+        "default_rent": default_rent,
     }
 
 
@@ -168,10 +178,10 @@ CA_COUNTY_COORDS = {
 def build_input_row(inputs, lookups, ppi_df):
     """Create a single-row DataFrame matching the feature pipeline's expected columns."""
     county = inputs["county"]
-    region = lookups["county_region"].get(county, "Other Northern CA")
-    fmr = lookups["county_fmr"].get(county, 1500.0)
-    income = lookups["county_income"].get(county, 80000.0)
-    rent = lookups["county_rent"].get(county, 1500.0)
+    region = lookups["county_region"].get(county, lookups["default_region"])
+    fmr = lookups["county_fmr"].get(county, lookups["default_fmr"])
+    income = lookups["county_income"].get(county, lookups["default_income"])
+    rent = lookups["county_rent"].get(county, lookups["default_rent"])
 
     # Get PPI for the selected year (or latest available)
     ppi_year = ppi_df[ppi_df["year"] <= inputs["pis_year"]]
@@ -628,7 +638,7 @@ def render_comparables(models, df, lookups, ppi_df, inputs):
         "their award levels and project sizes don't reflect post-2015 cost realities; "
         "for a 2026 query, a $300K award from a 2002 project is not a useful reference."
     )
-    region = lookups["county_region"].get(inputs["county"], "Other Northern CA")
+    region = lookups["county_region"].get(inputs["county"], lookups["default_region"])
     profile = models["archetype_profile"]
 
     group_match = profile[
