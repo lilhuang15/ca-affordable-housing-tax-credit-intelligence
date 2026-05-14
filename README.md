@@ -31,6 +31,8 @@ Given a project's characteristics (county, size, unit mix, credit type, housing 
 
 XGBoost is the **deployed point model**, not Stacking v2. Although the stack is ~0.4pp better on MAPE, the deployment trade-off favors XGBoost: SHAP `TreeExplainer` works natively (precise + millisecond), the artifact is 236 KB vs Stacking's ~80 MB, inference latency is ~3× lower, and bootstrap 95% CIs for MAPE overlap. Stacking v2 is reported as an offline benchmark.
 
+**Validation methodology — three-stage decomposition.** NB04 §10a separates the test-set R² gap into its two root causes: `train − CV` isolates **in-distribution overfit**; `CV − test` isolates **distribution-shift impact** (CV folds span 2000–2021, test is 2022–2025). The diagnostic informed two decisions: (a) the **deployment choice** — XGBoost shows the most controlled overfit profile among tree-based models thanks to `max_depth=3`, while Random Forest's overfit is severe enough to disqualify it independently of shift; (b) the **roadmap** — for every tree-based model the shift gap is small enough (within the ∼0.04 R² bootstrap noise band) that improvement effort should target feature granularity and data volume rather than additional shift-mitigation. Full per-model breakdown in [`docs/Pipeline_Technical_Guide.md` §5e](docs/Pipeline_Technical_Guide.md).
+
 
 ### Prediction Interval Coverage (target: 90%)
 

@@ -65,6 +65,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from streamlit_app import (
     build_input_row,
+    build_lookups,
     get_shap_explanation,
     CA_COUNTY_COORDS,
     MODEL_DIR,
@@ -104,15 +105,10 @@ def project_data():
 
 @pytest.fixture(scope="module")
 def lookups(project_data):
-    """Build the lookup tables the app uses."""
-    df = project_data
-    return {
-        "county_region": df.groupby("county")["region"].agg(lambda x: x.mode()[0]).to_dict(),
-        "county_fmr": df.groupby("county")["fmr_2br"].median().to_dict(),
-        "county_income": df.groupby("county")["county_median_income"].median().to_dict(),
-        "county_rent": df.groupby("county")["county_median_rent"].median().to_dict(),
-        "counties": sorted(df["county"].dropna().unique()),
-    }
+    """Build the lookup tables the app uses — delegate to the real
+    build_lookups so the test stays in sync with the app's schema (including
+    default_region / default_fmr / default_income / default_rent fallbacks)."""
+    return build_lookups(project_data)
 
 
 @pytest.fixture(scope="module")
