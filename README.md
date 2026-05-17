@@ -4,7 +4,7 @@ A data-driven ML platform that predicts **annual federal tax credit allocations*
 
 > Built for developers, investors, and housing finance agencies who need a data-driven sanity check on credit requests before submitting to CTCAC.
 
-**🔗 Live demo:** _(deploy URL — paste here once Streamlit Cloud is live)_
+**🔗 Live demo:** [ca-lihtc-intelligence.streamlit.app](https://ca-lihtc-intelligence.streamlit.app)
 **📂 Repo:** [github.com/lilhuang15/ca-affordable-housing-tax-credit-intelligence](https://github.com/lilhuang15/ca-affordable-housing-tax-credit-intelligence)
 
 ---
