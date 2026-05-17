@@ -4,6 +4,19 @@ A data-driven ML platform that predicts **annual federal tax credit allocations*
 
 > Built for developers, investors, and housing finance agencies who need a data-driven sanity check on credit requests before submitting to CTCAC.
 
+**🔗 Live demo:** _(deploy URL — paste here once Streamlit Cloud is live)_
+**📂 Repo:** [github.com/lilhuang15/ca-affordable-housing-tax-credit-intelligence](https://github.com/lilhuang15/ca-affordable-housing-tax-credit-intelligence)
+
+---
+
+## Highlights
+
+- **R² = 0.62, MAPE = 26 %** on a 2022–2025 holdout that is **2.26× larger in mean** than the 2000–2021 training window — distribution-shift-aware evaluation, not lab-clean metrics
+- **90 % prediction interval via log-space split conformal**, calibrated on a 2020–2021 hold-out residual quantile → **89.9 % empirical coverage** on the 2022–2025 test set (multiplicative band `pred × [0.57, 1.75]`, adapts to project size, finite-sample guarantee under exchangeability)
+- **Three-stage train / CV / test diagnostic** (NB04 §10a, Tab IV) separates in-distribution overfit from real distribution-shift impact across all 5 candidate models — drove the deployment trade-off (XGBoost over Stacking-v2 despite 0.4 pp MAPE gap on artifact-size and SHAP-latency grounds)
+- **ColumnTransformer with cross-fitted TargetEncoder + StandardScaler** for the 50+ county feature — prevents within-training target leakage on the highest-cardinality column; documented bug-fix in NB03 §6 where missing scaler caused KNN cosine similarity to collapse from ~93 % to ~32 % on novel inputs
+- **Live Streamlit app** with 4 tabs: per-project estimator (point + interval + SHAP local + 10-year equity), market comparables (KNN + project-group lookup table + geo map), statewide trends (with credit-class filter), methodology walk-through (time-split, distribution shift, actual-vs-predicted, global SHAP, conformal coverage)
+
 ---
 
 ## What It Does
