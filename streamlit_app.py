@@ -872,7 +872,15 @@ def render_trends(df):
 
     # --- Housing type breakdown ---
     st.subheader("Credit per Unit by Housing Type")
-    ht_trend = df.groupby(["pis_year", "housing_type"]).agg(
+    ht_credit_type = st.radio(
+        "Credit Type",
+        options=["9%", "4%"],
+        horizontal=True,
+        key="trends_ht_credit_type",
+        help="9% credits are competitive and typically larger; 4% credits are bond-financed and smaller. Filter to compare housing-type trends within one credit class.",
+    )
+    ht_df = df[df["credit_type"] == ht_credit_type]
+    ht_trend = ht_df.groupby(["pis_year", "housing_type"]).agg(
         median_cpu=("credit_per_unit", "median"),
     ).reset_index()
 
@@ -887,7 +895,10 @@ def render_trends(df):
         color_discrete_map=HOUSING_TYPE_COLORS,
     )
     fig_ht.update_traces(line=dict(width=2.2), marker=dict(size=7))
-    fig_ht.update_layout(yaxis_tickformat="$,.0f")
+    fig_ht.update_layout(
+        yaxis_tickformat="$,.0f",
+        title=f"Median Credit per Unit · {ht_credit_type} credits only",
+    )
     st.plotly_chart(fig_ht, width="stretch")
 
     # --- Volume over time ---
