@@ -233,6 +233,61 @@ def build_input_row(inputs, lookups, ppi_df):
 
 
 # ---------------------------------------------------------------------------
+# Display-name mapping for SHAP and other feature-name UIs
+# ---------------------------------------------------------------------------
+# Sklearn's ColumnTransformer emits feature names with `num__/te__/ohe__`
+# prefixes and snake_case fields (e.g. `num__fmr_2br`, `ohe__housing_type_Large
+# Family`). Showing these raw confuses non-ML users. `pretty_feature_name`
+# rewrites them into plain English for the SHAP bar charts (Tab 1 + Tab 4).
+_NUM_LABELS = {
+    "total_units": "Total Units",
+    "li_units_pct": "Low-Income Unit %",
+    "studio_pct": "Studio/SRO Unit %",
+    "one_br_pct": "1-BR Unit %",
+    "two_br_pct": "2-BR Unit %",
+    "three_plus_br_pct": "3-BR+ Unit %",
+    "deep_ami_pct": "Deep AMI ≤30% Units",
+    "low_ami_pct": "Low AMI 30–50% Units",
+    "mid_ami_pct": "Mid AMI 50–60% Units",
+    "pis_year": "Placed-in-Service Year",
+    "ppi_at_allocation": "PPI (Construction Cost)",
+    "ppi_yoy_change": "PPI YoY Change",
+    "ppi_2yr_trend": "PPI 2-Year Trend",
+    "fmr_2br": "Fair Market Rent (2-BR)",
+    "county_median_income": "County Median Income",
+    "county_median_rent": "County Median Rent",
+}
+_TE_LABELS = {
+    "county": "County",
+}
+# Match longest keys first so e.g. `housing_type_*` isn't split as `housing_*`.
+_OHE_COL_LABELS = {
+    "credit_type": "Credit Type",
+    "construction_type": "Construction",
+    "housing_type": "Housing Type",
+    "region": "Region",
+}
+
+
+def pretty_feature_name(raw: str) -> str:
+    """Rewrite a ColumnTransformer feature name into a user-readable label."""
+    if raw.startswith("num__"):
+        key = raw[len("num__"):]
+        return _NUM_LABELS.get(key, key.replace("_", " ").title())
+    if raw.startswith("te__"):
+        key = raw[len("te__"):]
+        return _TE_LABELS.get(key, key.replace("_", " ").title())
+    if raw.startswith("ohe__"):
+        key = raw[len("ohe__"):]
+        for col in sorted(_OHE_COL_LABELS, key=len, reverse=True):
+            prefix = col + "_"
+            if key.startswith(prefix):
+                return f"{_OHE_COL_LABELS[col]}: {key[len(prefix):]}"
+        return key
+    return raw
+
+
+# ---------------------------------------------------------------------------
 # Helper: SHAP waterfall (top features)
 # ---------------------------------------------------------------------------
 def get_shap_explanation(models, X_transformed, feature_names, top_n=8):
@@ -240,20 +295,9 @@ def get_shap_explanation(models, X_transformed, feature_names, top_n=8):
     shap_vals = models["shap"].shap_values(X_transformed)
     sv = shap_vals[0]  # single row
 
-    # Pair feature names with SHAP values
     pairs = list(zip(feature_names, sv))
     pairs.sort(key=lambda x: abs(x[1]), reverse=True)
-    top = pairs[:top_n]
-
-    # Clean feature names for display
-    clean_names = []
-    for name, val in top:
-        # Remove prefix like num__, te__, ohe__
-        display = name.split("__", 1)[-1] if "__" in name else name
-        display = display.replace("_", " ").title()
-        clean_names.append((display, val))
-
-    return clean_names
+    return [(pretty_feature_name(name), val) for name, val in pairs[:top_n]]
 
 
 # ---------------------------------------------------------------------------
@@ -309,11 +353,8 @@ def compute_global_shap(_models, _df_test, n_sample=200, seed=42):
     df = pd.DataFrame({
         "feature": feature_names,
         "mean_abs_shap": mean_abs,
+        "display_name": [pretty_feature_name(f) for f in feature_names],
     })
-    # Strip ColumnTransformer prefixes so the bar labels read cleanly.
-    df["display_name"] = df["feature"].str.replace(
-        r"^(num__|te__|ohe__)", "", regex=True
-    ).str.replace("_", " ").str.title()
     return df.sort_values("mean_abs_shap", ascending=False).reset_index(drop=True)
 
 
@@ -375,8 +416,13 @@ def render_sidebar(lookups):
     )
 
     li_units_pct = st.sidebar.slider(
-        "Low-Income Units %", 50, 100, 95, 5,
-        help="Percentage of total units restricted as low-income",
+        "Low-Income Units %", 20, 100, 95, 5,
+        help=(
+            "Percentage of total units restricted as low-income. "
+            "Federal LIHTC minimum is 20% (20-50 set-aside test); most CA "
+            "projects are 95–100%, but inclusionary deals in market-rate "
+            "buildings (e.g. SF luxury) can be 20–35%."
+        ),
     ) / 100.0
 
     return {
@@ -495,11 +541,15 @@ def render_credit_estimator(models, lookups, ppi_df, inputs):
     # --- Implied Eligible Basis ---
     st.subheader("Implied Eligible Basis (Cost Proxy)")
     st.caption(
-        "Derived as Annual Credit ÷ Credit Rate. This is a benchmarking proxy, "
-        "not a direct development cost figure."
+        "**Eligible Basis = Annual Credit ÷ (Credit Rate × Low-Income Unit Fraction).** "
+        "This is the *whole building's* depreciable construction cost — for "
+        "mixed-income deals it includes the market-rate portion, so it will "
+        "look larger than the Low-Income-only build cost. The credit itself is computed "
+        "on Qualified Basis = Eligible Basis × Low-Income Unit Fraction. "
+        "Benchmarking proxy only, not a direct development cost figure."
     )
     credit_rate = 0.09 if inputs["credit_type"] == "9%" else 0.04
-    basis_p50 = p50 / credit_rate
+    basis_p50 = p50 / (credit_rate * inputs["li_units_pct"])
     basis_per_unit = basis_p50 / inputs["total_units"]
 
     basis_col1, basis_col2, basis_col3 = st.columns(3)
