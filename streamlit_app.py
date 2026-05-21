@@ -327,8 +327,8 @@ def render_sidebar(lookups):
     county = st.sidebar.selectbox(
         "County",
         lookups["counties"],
-        index=lookups["counties"].index("Los Angeles")
-        if "Los Angeles" in lookups["counties"] else 0,
+        index=lookups["counties"].index("San Francisco")
+        if "San Francisco" in lookups["counties"] else 0,
     )
 
     housing_type = st.sidebar.selectbox(
@@ -480,6 +480,7 @@ def render_credit_estimator(models, lookups, ppi_df, inputs):
         (stream_col3, f"Upper ({pct_high:+.0f}%)", p90),
     ]:
         ten_yr = annual * 10
+        annual_equity = annual * credit_price
         equity = ten_yr * credit_price
         # Escape every "$" as "\$" so streamlit doesn't enter LaTeX math mode
         # (two unescaped $ on a line trigger `$...$` math, which makes the text
@@ -487,8 +488,9 @@ def render_credit_estimator(models, lookups, ppi_df, inputs):
         # adjacent dollar amounts). Drop bold markers to keep the bullets plain.
         col.markdown(f"**{label}**")
         col.markdown(f"- Annual credit: \\${annual:,.0f}")
+        col.markdown(f"- Annual equity @ \\${credit_price:.2f}: \\${annual_equity:,.0f}")
         col.markdown(f"- 10-year stream: \\${ten_yr:,.0f}")
-        col.markdown(f"- Equity @ \\${credit_price:.2f}: \\${equity:,.0f}")
+        col.markdown(f"- 10-year equity @ \\${credit_price:.2f}: \\${equity:,.0f}")
 
     # --- Implied Eligible Basis ---
     st.subheader("Implied Eligible Basis (Cost Proxy)")
