@@ -7,6 +7,12 @@ A data-driven ML platform that predicts **annual federal tax credit allocations*
 **🔗 Live demo:** [ca-lihtc-intelligence.streamlit.app](https://ca-lihtc-intelligence.streamlit.app)
 **📂 Repo:** [github.com/lilhuang15/ca-affordable-housing-tax-credit-intelligence](https://github.com/lilhuang15/ca-affordable-housing-tax-credit-intelligence)
 
+![Credit Estimator — point estimate with 90% conformal interval](assets/tab1_estimator.png)
+
+| II · Comparables | III · Trends | IV · Method Insight |
+|---|---|---|
+| ![KNN top-10 similar projects](assets/tab2_comparables.png) | ![Statewide credit trends](assets/tab3_trends.png) | ![Time-split and validation walkthrough](assets/tab4_method_insight.png) |
+
 ---
 
 ## Highlights
@@ -24,7 +30,7 @@ A data-driven ML platform that predicts **annual federal tax credit allocations*
 Given a project's characteristics (county, size, unit mix, credit type, housing type), the platform outputs:
 
 1. **Expected annual federal credit** — XGBoost point estimate + 90% prediction interval (split conformal in log space, displayed as a multiplicative band: pred × [exp(−q̂), exp(+q̂)]; with 90% target coverage the lower/upper bounds correspond to **P5 / P95**)
-2. **Implied eligible basis** — a development cost proxy derived from the predicted credit (`credit / rate`)
+2. **Implied eligible basis** — a development cost proxy derived from the predicted credit (`credit ÷ (credit rate × low-income unit fraction)`; the LI fraction matters because the credit is computed on Qualified Basis = Eligible Basis × LI fraction)
 3. **Market comparables** — the 10 most similar historical CA LIHTC projects
 4. **SHAP explanation** — which features drove the prediction and by how much
 
@@ -83,7 +89,46 @@ Coverage retains the finite-sample guarantee under exchangeability. The conforma
 
 ---
 
-## Pipeline
+## Pipeline & Architecture
+
+```mermaid
+flowchart LR
+    subgraph sources["Data Sources"]
+        CTCAC["CTCAC projects<br/>(6,103 rows)"]
+        FRED["FRED PPI"]
+        FMR["HUD FMR"]
+        ACS["Census ACS"]
+    end
+
+    subgraph notebooks["Notebook Pipeline"]
+        NB01["01 Clean<br/>ctcac_clean.csv (5,496)"]
+        NB02["02 Enrich<br/>lihtc_ca_clean.parquet"]
+        NB03["03 Features<br/>ColumnTransformer, fit on train only"]
+        NB04["04 Modeling<br/>Ridge / RF / XGB / Stacking / LGBM-quantile"]
+    end
+
+    subgraph artifacts["Deployed Artifacts"]
+        XGB["xgb_model.pkl (236 KB)"]
+        CONF["conformal_calibration.pkl"]
+        KNN["knn_model.pkl"]
+        PG["archetype_profile.parquet<br/>(Project Group lookup)"]
+    end
+
+    subgraph app["Streamlit App"]
+        T1["I · Estimator<br/>point + 90% interval + SHAP"]
+        T2["II · Comparables<br/>KNN + Project Group + map"]
+        T3["III · Trends"]
+        T4["IV · Method Insight"]
+    end
+
+    CTCAC --> NB01 --> NB02 --> NB03 --> NB04
+    FRED --> NB02
+    FMR --> NB02
+    ACS --> NB02
+    NB04 --> XGB & CONF & KNN & PG
+    XGB & CONF --> T1
+    KNN & PG --> T2
+```
 
 ```
 01_data_process.ipynb    →  ctcac_clean.csv         (5,496 rows)
