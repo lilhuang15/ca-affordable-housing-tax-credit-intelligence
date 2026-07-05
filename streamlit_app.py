@@ -34,6 +34,7 @@ st.set_page_config(
     page_title="CA LIHTC Credit Intelligence",
     page_icon="◆",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 inject_theme()
 
@@ -685,8 +686,8 @@ def render_comparables(models, df, lookups, ppi_df, inputs):
     # shows a single-project "group" with meaningless statistics.
     st.subheader("Project Group")
     st.caption(
-        "Historical context from CA LIHTC projects placed in service 2015–2025 — "
-        "the modern post-QAP-reform era. Earlier projects are excluded because "
+        "Historical context from CA LIHTC projects placed in service 2015–2025. "
+        "Earlier projects are excluded because "
         "their award levels and project sizes don't reflect post-2015 cost realities; "
         "for a 2026 query, a $300K award from a 2002 project is not a useful reference."
     )
