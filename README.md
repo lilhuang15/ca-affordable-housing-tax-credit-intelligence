@@ -50,7 +50,7 @@ Given a project's characteristics (county, size, unit mix, credit type, housing 
 
 XGBoost is the **deployed point model**, not Stacking v2. Although the stack is ~0.4pp better on MAPE, the deployment trade-off favors XGBoost: SHAP `TreeExplainer` works natively (precise + millisecond), the artifact is 236 KB vs Stacking's ~80 MB, inference latency is ~3× lower, and bootstrap 95% CIs for MAPE overlap. Stacking v2 is reported as an offline benchmark.
 
-**Validation methodology — three-stage decomposition.** NB04 §10a separates the test-set R² gap into its two root causes: `train − CV` isolates **in-distribution overfit**; `CV − test` isolates **distribution-shift impact** (CV folds span 2000–2021, test is 2022–2025). The diagnostic informed two decisions: (a) the **deployment choice** — XGBoost shows the most controlled overfit profile among tree-based models thanks to `max_depth=3`, while Random Forest's overfit is severe enough to disqualify it independently of shift; (b) the **roadmap** — for every tree-based model the shift gap is small enough (within the ∼0.04 R² bootstrap noise band) that improvement effort should target feature granularity and data volume rather than additional shift-mitigation. Full per-model breakdown in [`docs/Pipeline_Technical_Guide.md` §5e](docs/Pipeline_Technical_Guide.md).
+**Validation methodology — three-stage decomposition.** NB04 §10a separates the test-set R² gap into its two root causes: `train − CV` isolates **in-distribution overfit**; `CV − test` isolates **distribution-shift impact** (CV folds span 2000–2021, test is 2022–2025). The diagnostic informed two decisions: (a) the **deployment choice** — XGBoost shows the most controlled overfit profile among tree-based models thanks to `max_depth=3`, while Random Forest's overfit is severe enough to disqualify it independently of shift; (b) the **roadmap** — for every tree-based model the shift gap is small enough (within the ∼0.04 R² bootstrap noise band) that improvement effort should target feature granularity and data volume rather than additional shift-mitigation. Full per-model breakdown in [`docs/Pipeline_Technical_Guide.md` §5e](docs/Pipeline_Technical_Guide.md), and the full train / CV / test table is on the live app's Method Insight tab (visible in the screenshot above).
 
 
 ### Prediction Interval Coverage (target: 90%)
@@ -68,6 +68,8 @@ The naive LightGBM quantile model under-covers severely on the 2022–2025 holdo
 [ pred × exp(−q̂_log),  pred × exp(+q̂_log) ]
 = [ pred × multiplier_low,  pred × multiplier_high ]
 ```
+
+Here **q̂** is a single calibration constant: the 90th-percentile absolute error of the model's log-scale predictions, measured on the held-out 2020–2021 calibration years. Exponentiating ±q̂ turns that error budget into the multiplicative band — currently ×0.57 / ×1.75, i.e. −43% / +75%.
 
 The two multipliers are model-level constants; the **percentage shift is the same for every project**, but the **dollar width adapts to project size** — a $500K project gets a tighter dollar band than a $5M project. This form has two advantages over an additive dollar-space conformal:
 
@@ -160,7 +162,7 @@ streamlit_app.py         →  interactive demo
 
 ## Feature Engineering Highlights
 
-- **TargetEncoder + StandardScaler** for `county` (50+ unique values) — 5-fold cross-fitting, empirical Bayes smoothing, fit on training split only, **followed by `StandardScaler`**. The trailing scaler is essential: TargetEncoder outputs raw-dollar means (~$5e5–$2e6) which would otherwise be ~250,000× the std of every other column and dominate every distance-based downstream consumer (KNN cosine, Ridge loss, etc.). Tree models are scale-invariant so the scaler is neutral for them but unifies the contract every consumer sees.
+- **TargetEncoder + StandardScaler** for `county` (50+ unique values) — 5-fold cross-fitting, empirical Bayes smoothing, fit on training split only, **followed by `StandardScaler`**. The trailing scaler is essential: TargetEncoder outputs raw-dollar means ($500K–$2M), a column whose standard deviation (std) is about $250K — while every other scaled column has std = 1. Without the trailing scaler, that one column would be ~250,000× wider than the rest and would dominate every distance-based downstream consumer (KNN cosine, Ridge loss, etc.). Tree models are scale-invariant so the scaler is neutral for them but unifies the contract every consumer sees.
 - **OneHotEncoder** for `credit_type`, `construction_type`, `housing_type`, and `region` — region was moved here from TargetEncoder because its 5 categories produced a scalar 71% correlated with county TE (redundant for trees, harmful for Ridge)
 - **StandardScaler + median imputation** for 16 numeric features
 - **ColumnTransformer fit on training split only** — strict leakage prevention

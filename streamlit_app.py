@@ -971,11 +971,12 @@ def render_trends(df):
     )
     ht_df = df[df["credit_type"] == ht_credit_type]
 
-    # Default to 3 of 6 types — all six at once is unreadable spaghetti, and
-    # some types are sparse within a credit class (9% SRO mostly stops after
-    # 2019; 9% Non-Targeted ends in 2004). The rest are one click away.
+    # Default to the 3 biggest housing types by project count (Large Family
+    # 1,977 / Senior 886 / Special Needs 485). SRO (85 projects, 9% line breaks
+    # ~2019) and Non-Targeted (9% ends 2004) are too sparse to be defaults —
+    # they stay one click away in the multiselect.
     all_types = [t for t in HOUSING_TYPE_COLORS if t in set(ht_df["housing_type"].unique())]
-    default_types = [t for t in ("Large Family", "Senior", "SRO") if t in all_types]
+    default_types = [t for t in ("Large Family", "Senior", "Special Needs") if t in all_types]
     selected_types = st.multiselect(
         "Housing types to show",
         all_types,
@@ -1007,8 +1008,8 @@ def render_trends(df):
         )
         st.plotly_chart(fig_ht, width="stretch")
         st.caption(
-            "Showing 3 of 6 types by default — add the rest above. Short or broken "
-            "lines just mean few projects of that type in this credit class."
+            "Showing the 3 biggest housing types — add the rest above. A short "
+            "line just means that type has few projects in this credit class."
         )
     else:
         st.info("Pick at least one housing type above.")
@@ -1026,8 +1027,9 @@ def render_trends(df):
     fig_vol.update_layout(barmode="stack")
     st.plotly_chart(fig_vol, width="stretch")
     st.caption(
-        "Volume dipped after the 2008 financial crisis and surged in 2023–24 — "
-        "with 4% bond deals driving most of the recent growth."
+        "Project counts dipped after the 2008 crash and surged in 2023–24. By count, "
+        "4% bond deals are steadily around 60% of the market — 9% deals are bigger "
+        "in dollars, not in numbers."
     )
 
 
@@ -1299,8 +1301,11 @@ def _render_overfit_shift_table():
         "train and test R² is in-distribution overfit, not the 2.26× shift. That's "
         "why improvement effort goes to features and data volume, not shift "
         "correction, and XGBoost's controlled overfit is one reason it's the "
-        "deployed model. (Ridge is omitted: its CV R² of −28.9 comes from linear "
-        "extrapolation blow-ups on the log scale; full table in NB04 §10a.)"
+        "deployed model. The overfit column also reads larger than it is: "
+        "walk-forward CV folds validate on later years, so part of the train−CV "
+        "gap is drift inside the training window, not pure variance. (Ridge is "
+        "omitted: its CV R² of −28.9 comes from linear extrapolation blow-ups on "
+        "the log scale; full table in NB04 §10a.)"
     )
 
 
