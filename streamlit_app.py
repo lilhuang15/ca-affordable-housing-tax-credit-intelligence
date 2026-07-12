@@ -495,23 +495,47 @@ def render_credit_estimator(models, lookups, ppi_df, inputs):
         f"{models['conformal']['coverage_test']:.1f}% of the time."
     )
 
-    # --- Prediction range bar chart ---
+    # --- Prediction range: dot + error bar (one estimate with its interval) ---
+    # The three numbers are ONE estimate and its uncertainty range, not three
+    # quantities to compare — so they're drawn as a dot with a whisker, dollar
+    # amounts on the y-axis, instead of three side-by-side bars.
     st.subheader("Annual Federal Credit — Prediction Range")
-    fig_bar = go.Figure()
-    fig_bar.add_trace(go.Bar(
-        x=[lower_label, "Point estimate", upper_label],
-        y=[p10, p50, p90],
-        marker_color=[CHART_COLORS["lower"], CHART_COLORS["point"], CHART_COLORS["upper"]],
-        text=[f"${p10:,.0f}", f"${p50:,.0f}", f"${p90:,.0f}"],
-        textposition="outside",
+    fig_range = go.Figure()
+    fig_range.add_trace(go.Scatter(
+        x=["Your project"], y=[p50],
+        mode="markers",
+        marker=dict(size=18, color=CHART_COLORS["upper"]),
+        error_y=dict(
+            type="data", symmetric=False,
+            array=[p90 - p50], arrayminus=[p50 - p10],
+            color=CHART_COLORS["point"], thickness=4, width=22,
+        ),
+        customdata=[[p10, p90]],
+        hovertemplate=(
+            "P95: $%{customdata[1]:,.0f}<br>"
+            "Point: $%{y:,.0f}<br>"
+            "P5: $%{customdata[0]:,.0f}<extra></extra>"
+        ),
     ))
-    fig_bar.update_layout(
+    for yv, txt, bold in (
+        (p10, f"P5&nbsp;&nbsp;${p10:,.0f}", False),
+        (p50, f"Point&nbsp;&nbsp;${p50:,.0f}", True),
+        (p90, f"P95&nbsp;&nbsp;${p90:,.0f}", False),
+    ):
+        fig_range.add_annotation(
+            x="Your project", y=yv, xshift=110, xanchor="left", showarrow=False,
+            text=f"<b>{txt}</b>" if bold else txt,
+            font=dict(size=13),
+        )
+    fig_range.update_layout(
         yaxis_title="Annual Federal Credit ($)",
         yaxis_tickformat="$,.0f",
-        height=400,
+        yaxis_range=[0, p90 * 1.15],
+        xaxis_range=[-0.9, 1.7],
+        height=420,
         showlegend=False,
     )
-    st.plotly_chart(fig_bar, width="stretch")
+    st.plotly_chart(fig_range, width="stretch")
 
     # --- 10-year credit stream & equity ---
     st.subheader("10-Year Credit Stream & Equity Estimate")
@@ -658,22 +682,22 @@ def render_comparables(models, df, lookups, ppi_df, inputs):
         "project_name", "county", "pis_year", "housing_type",
         "construction_type", "credit_type", "total_units",
         "annual_federal_award", "credit_per_unit",
-        "implied_basis_per_unit", "developer", "similarity",
+        "developer", "similarity",
     ]
     display_df = comps[display_cols].copy()
+    # Basis/Unit dropped: it's a formula-derived echo of the award (basis =
+    # award / (rate × LI)), and removing it + shorter headers lets every
+    # column fit without horizontal scrolling.
     display_df.columns = [
-        "Project", "County", "Year", "Housing Type",
-        "Construction", "Credit Type", "Units",
-        "Annual Credit", "Credit/Unit",
-        "Basis/Unit", "Developer", "Similarity",
+        "Project", "County", "Year", "Type",
+        "Constr.", "Credit", "Units",
+        "Annual Credit", "$/Unit",
+        "Developer", "Similarity",
     ]
     display_df["Annual Credit"] = display_df["Annual Credit"].apply(
         lambda x: f"${x:,.0f}" if pd.notna(x) else "N/A"
     )
-    display_df["Credit/Unit"] = display_df["Credit/Unit"].apply(
-        lambda x: f"${x:,.0f}" if pd.notna(x) else "N/A"
-    )
-    display_df["Basis/Unit"] = display_df["Basis/Unit"].apply(
+    display_df["$/Unit"] = display_df["$/Unit"].apply(
         lambda x: f"${x:,.0f}" if pd.notna(x) else "N/A"
     )
     display_df["Similarity"] = display_df["Similarity"].apply(lambda x: f"{x:.2%}")
@@ -794,6 +818,10 @@ def render_comparables(models, df, lookups, ppi_df, inputs):
 
     # --- Trend chart: credit per unit over time for this county + housing type ---
     st.subheader("Credit Trend — Your County & Housing Type")
+    st.caption(
+        "Annual medians are noisy at the county level (small n per year), so the "
+        "Project Group panel above aggregates 2015–2025 to provide a more stable reference."
+    )
     county_ht = df[
         (df["county"] == inputs["county"]) &
         (df["housing_type"] == inputs["housing_type"])
@@ -891,6 +919,11 @@ def render_trends(df):
     )
     fig_state.update_layout(yaxis_tickformat="$,.0f")
     st.plotly_chart(fig_state, width="stretch")
+    st.caption(
+        "Per-unit credits have roughly tripled since 2000, with 9% credits "
+        "consistently exceeding 4% bond deals by 30–50% — a trend the model "
+        "learns to predict 2026 values."
+    )
 
     # --- County comparison ---
     st.subheader("County Comparison")
@@ -922,6 +955,10 @@ def render_trends(df):
         )
         fig_county.update_layout(yaxis_tickformat="$,.0f")
         st.plotly_chart(fig_county, width="stretch")
+        st.caption(
+            "Pick 2–5 counties to compare. Yearly medians can be spiky in "
+            "smaller counties — fewer projects per year."
+        )
 
     # --- Housing type breakdown ---
     st.subheader("Credit per Unit by Housing Type")
@@ -933,36 +970,65 @@ def render_trends(df):
         help="9% credits are competitive and typically larger; 4% credits are bond-financed and smaller. Filter to compare housing-type trends within one credit class.",
     )
     ht_df = df[df["credit_type"] == ht_credit_type]
-    ht_trend = ht_df.groupby(["pis_year", "housing_type"]).agg(
-        median_cpu=("credit_per_unit", "median"),
-    ).reset_index()
 
-    fig_ht = px.line(
-        ht_trend, x="pis_year", y="median_cpu", color="housing_type",
-        markers=True,
-        labels={
-            "pis_year": "Year",
-            "median_cpu": "Median Credit per Unit ($)",
-            "housing_type": "Housing Type",
-        },
-        color_discrete_map=HOUSING_TYPE_COLORS,
+    # Default to 3 of 6 types — all six at once is unreadable spaghetti, and
+    # some types are sparse within a credit class (9% SRO mostly stops after
+    # 2019; 9% Non-Targeted ends in 2004). The rest are one click away.
+    all_types = [t for t in HOUSING_TYPE_COLORS if t in set(ht_df["housing_type"].unique())]
+    default_types = [t for t in ("Large Family", "Senior", "SRO") if t in all_types]
+    selected_types = st.multiselect(
+        "Housing types to show",
+        all_types,
+        default=default_types,
+        key="trends_ht_types",
     )
-    fig_ht.update_traces(line=dict(width=2.2), marker=dict(size=7))
-    fig_ht.update_layout(
-        yaxis_tickformat="$,.0f",
-        title=f"Median Credit per Unit · {ht_credit_type} credits only",
-    )
-    st.plotly_chart(fig_ht, width="stretch")
+
+    if selected_types:
+        ht_trend = ht_df[ht_df["housing_type"].isin(selected_types)].groupby(
+            ["pis_year", "housing_type"]
+        ).agg(
+            median_cpu=("credit_per_unit", "median"),
+        ).reset_index()
+
+        fig_ht = px.line(
+            ht_trend, x="pis_year", y="median_cpu", color="housing_type",
+            markers=True,
+            labels={
+                "pis_year": "Year",
+                "median_cpu": "Median Credit per Unit ($)",
+                "housing_type": "Housing Type",
+            },
+            color_discrete_map=HOUSING_TYPE_COLORS,
+        )
+        fig_ht.update_traces(line=dict(width=2.2), marker=dict(size=7))
+        fig_ht.update_layout(
+            yaxis_tickformat="$,.0f",
+            title=f"Median Credit per Unit · {ht_credit_type} credits only",
+        )
+        st.plotly_chart(fig_ht, width="stretch")
+        st.caption(
+            "Showing 3 of 6 types by default — add the rest above. Short or broken "
+            "lines just mean few projects of that type in this credit class."
+        )
+    else:
+        st.info("Pick at least one housing type above.")
 
     # --- Volume over time ---
     st.subheader("Project Volume by Year")
-    vol = df.groupby("pis_year").size().reset_index(name="Projects")
+    # Stacked by credit type: volume AND composition in one chart, colors
+    # matching the statewide credit-type chart above.
+    vol = df.groupby(["pis_year", "credit_type"]).size().reset_index(name="Projects")
     fig_vol = px.bar(
-        vol, x="pis_year", y="Projects",
-        labels={"pis_year": "Year", "Projects": "Number of Projects"},
-        color_discrete_sequence=[PALETTE["navy"]],
+        vol, x="pis_year", y="Projects", color="credit_type",
+        labels={"pis_year": "Year", "Projects": "Number of Projects", "credit_type": "Credit Type"},
+        color_discrete_map={"9%": PALETTE["oxblood"], "4%": PALETTE["navy"]},
     )
+    fig_vol.update_layout(barmode="stack")
     st.plotly_chart(fig_vol, width="stretch")
+    st.caption(
+        "Volume dipped after the 2008 financial crisis and surged in 2023–24 — "
+        "with 4% bond deals driving most of the recent growth."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1209,6 +1275,35 @@ def _render_conformal_coverage(preds, conformal):
     )
 
 
+def _render_overfit_shift_table():
+    """§2 table — the three-stage R² decomposition from NB04 §10a.
+
+    train−CV isolates in-distribution overfit; CV−test isolates what the 2.26×
+    distribution shift actually cost. Values are hardcoded from the NB04 §10a
+    run — regenerate there if the models are retrained.
+    """
+    st.markdown(
+        "**Overfit vs. distribution shift — where the test gap really comes from (R²)**"
+    )
+    diag = pd.DataFrame({
+        "Model": ["Random Forest", "XGBoost (deployed)", "LightGBM p50", "Stacking v2"],
+        "Train": [0.936, 0.867, 0.898, 0.897],
+        "CV": [0.402, 0.597, 0.550, 0.601],
+        "Test": [0.399, 0.620, 0.546, 0.656],
+        "Overfit (Train−CV)": [0.535, 0.270, 0.347, 0.296],
+        "Shift (CV−Test)": [0.002, -0.023, 0.004, -0.054],
+    })
+    st.dataframe(diag, hide_index=True, width="stretch")
+    st.caption(
+        "For every tree model the shift column is basically zero — the gap between "
+        "train and test R² is in-distribution overfit, not the 2.26× shift. That's "
+        "why improvement effort goes to features and data volume, not shift "
+        "correction, and XGBoost's controlled overfit is one reason it's the "
+        "deployed model. (Ridge is omitted: its CV R² of −28.9 comes from linear "
+        "extrapolation blow-ups on the log scale; full table in NB04 §10a.)"
+    )
+
+
 def render_method_insight(models, df_train, df_test, model_comparison):
     st.header("Method Insight")
     st.caption("How the model was built and validated — for the technical reader.")
@@ -1222,6 +1317,7 @@ def render_method_insight(models, df_train, df_test, model_comparison):
     st.subheader("§ 2   Modeling — Does It Fit?")
     preds = compute_test_predictions(models, df_test)
     _render_actual_vs_predicted(preds, model_comparison)
+    _render_overfit_shift_table()
     shap_df = compute_global_shap(models, df_test)
     _render_global_shap(shap_df, n_sample=200)
 
