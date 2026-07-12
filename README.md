@@ -36,6 +36,19 @@ Given a project's characteristics (county, size, unit mix, credit type, housing 
 
 ---
 
+## Who It's For
+
+The annual federal credit is the number a LIHTC deal hangs on: investors price it, lenders size loans against it, and CTCAC scrutinizes it. Today it's estimated project-by-project in spreadsheets — no uncertainty range, no fast comparable lookup, no consistency across analysts. This tool is a free, public, data-driven sanity check.
+
+| Who | The question this answers |
+|---|---|
+| Affordable-housing developers | "Is my credit request realistic before I submit to CTCAC?" |
+| Investors / syndicators | "How much credit will this project really generate — and how sure are we?" |
+| Housing-finance agency analysts | "Which applications look out of line vs. comparable projects?" |
+| Construction lenders | "What equity range can this project actually support?" |
+
+---
+
 ## Results (Test Set: 2022–2025)
 
 ### Point Estimate Accuracy
